@@ -112,6 +112,7 @@ struct Parser<'src> {
     errors: Vec<Diagnostic>,
     depth: u32,
     stop_in: bool,
+    stop_pattern_guard: bool,
 }
 
 impl<'src> Parser<'src> {
@@ -132,7 +133,16 @@ impl<'src> Parser<'src> {
                 TextRange::empty(TextRange::from_usize(src.len(), src.len()).start()),
             ));
         }
-        Self { src, tokens, position: 0, options, errors, depth: 0, stop_in: false }
+        Self {
+            src,
+            tokens,
+            position: 0,
+            options,
+            errors,
+            depth: 0,
+            stop_in: false,
+            stop_pattern_guard: false,
+        }
     }
 
     fn parse_module_inner(&mut self) -> Result<ModModule, ParseError> {
@@ -171,6 +181,7 @@ impl<'src> Parser<'src> {
         let result = match self.current().kind {
             TokenKind::Def => self.function(false),
             TokenKind::Class => self.class(),
+            TokenKind::At => self.decorated_statement(),
             TokenKind::If => self.if_statement(),
             TokenKind::While => self.while_statement(),
             TokenKind::For => self.for_statement(false),
@@ -187,6 +198,10 @@ impl<'src> Parser<'src> {
             TokenKind::Break => self.simple_statement(),
             TokenKind::Continue => self.simple_statement(),
             TokenKind::Async => self.async_statement(),
+            TokenKind::Name if self.word_is("match") => self.try_match_statement(),
+            TokenKind::Name if self.word_is("type") && self.looks_like_type_alias() => {
+                self.type_alias_statement()
+            }
             _ => self.simple_or_assignment(),
         };
         self.leave_depth();
@@ -203,6 +218,109 @@ impl<'src> Parser<'src> {
         } else {
             self.simple_or_assignment()
         }
+    }
+
+    fn decorated_statement(&mut self) -> Result<Stmt, ParseError> {
+        let mut decorators = Vec::new();
+        while self.eat(TokenKind::At) {
+            decorators.push(self.expression(0)?);
+            self.expect(TokenKind::Newline)?;
+        }
+        let mut statement = match self.current().kind {
+            TokenKind::Def => self.function(false)?,
+            TokenKind::Class => self.class()?,
+            _ => return Err(self.error_here("expected function or class after decorator")),
+        };
+        match &mut statement {
+            Stmt::FunctionDef(node) | Stmt::AsyncFunctionDef(node) => {
+                node.decorator_list = decorators
+            }
+            Stmt::ClassDef(node) => node.decorator_list = decorators,
+            _ => {}
+        }
+        Ok(statement)
+    }
+
+    fn try_match_statement(&mut self) -> Result<Stmt, ParseError> {
+        let checkpoint = self.position;
+        let error_count = self.errors.len();
+        match self.match_statement() {
+            Ok(statement) => Ok(statement),
+            Err(_) => {
+                self.position = checkpoint;
+                self.errors.truncate(error_count);
+                self.simple_or_assignment()
+            }
+        }
+    }
+
+    fn match_statement(&mut self) -> Result<Stmt, ParseError> {
+        let start = self.current().range.start();
+        let keyword = self.expect(TokenKind::Name)?;
+        if self.name_text(keyword) != "match" {
+            return Err(self.error_here("expected match"));
+        }
+        let subject = Box::new(self.expression(0)?);
+        self.expect(TokenKind::Colon)?;
+        if !self.options.version.supports(PythonVersion::Py310) {
+            self.push_error(Diagnostic::unsupported(
+                self.previous().range,
+                "match statements require Python 3.10 or newer",
+            ));
+        }
+        self.expect(TokenKind::Newline)?;
+        self.expect(TokenKind::Indent)?;
+        let mut cases = Vec::new();
+        self.skip_newlines();
+        while self.at_word("case") {
+            let case_start = self.bump().range.start();
+            let pattern = self.pattern()?;
+            let guard = if self.at(TokenKind::If) {
+                self.bump();
+                Some(self.expression(0)?)
+            } else {
+                None
+            };
+            self.expect(TokenKind::Colon)?;
+            let body = self.block()?;
+            let end = body.last().map(Ranged::range).unwrap_or_else(|| self.previous().range).end();
+            cases.push(MatchCase { range: TextRange::new(case_start, end), pattern, guard, body });
+            self.skip_newlines();
+        }
+        self.expect(TokenKind::Dedent)?;
+        let end = cases.last().map(Ranged::range).unwrap_or_else(|| self.previous().range).end();
+        Ok(Stmt::Match(StmtMatch { range: TextRange::new(start, end), subject, cases }))
+    }
+
+    fn type_alias_statement(&mut self) -> Result<Stmt, ParseError> {
+        let start = self.bump().range.start();
+        let name_token = self.expect(TokenKind::Name)?;
+        let name = Expr::Name(ExprName {
+            range: name_token.range,
+            id: self.name_text(name_token).into(),
+            ctx: ExprContext::Store,
+        });
+        if self.eat(TokenKind::LSqb) {
+            let mut depth = 1u32;
+            while depth > 0 && !self.at(TokenKind::EndMarker) {
+                if self.eat(TokenKind::LSqb) {
+                    depth += 1;
+                } else if self.eat(TokenKind::RSqb) {
+                    depth = depth.saturating_sub(1);
+                } else {
+                    self.bump();
+                }
+            }
+        }
+        self.expect(TokenKind::Equal)?;
+        let value = Box::new(self.expression(0)?);
+        self.consume_line_end();
+        Ok(Stmt::TypeAlias(StmtTypeAlias {
+            range: TextRange::new(start, value.range().end()),
+            name: Box::new(name),
+            type_params: Vec::new(),
+            value,
+        }))
     }
 
     fn function(&mut self, is_async: bool) -> Result<Stmt, ParseError> {
@@ -401,8 +519,19 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::Colon)?;
         let body = self.block()?;
         let mut handlers = Vec::new();
+        let mut is_star = false;
         while self.eat(TokenKind::Except) {
             let handler_start = self.previous().range.start();
+            let handler_is_star = self.eat(TokenKind::Star);
+            if handler_is_star {
+                is_star = true;
+                if !self.options.version.supports(PythonVersion::Py311) {
+                    self.push_error(Diagnostic::unsupported(
+                        self.previous().range,
+                        "except* requires Python 3.11 or newer",
+                    ));
+                }
+            }
             let typ = if self.at(TokenKind::Colon) || self.at(TokenKind::As) {
                 None
             } else {
@@ -451,13 +580,8 @@ impl<'src> Parser<'src> {
             .or_else(|| body.last().map(Ranged::range))
             .unwrap_or_else(|| self.previous().range)
             .end();
-        Ok(Stmt::Try(StmtTry {
-            range: TextRange::new(start, end),
-            body,
-            handlers,
-            orelse,
-            finalbody,
-        }))
+        let node = StmtTry { range: TextRange::new(start, end), body, handlers, orelse, finalbody };
+        Ok(if is_star { Stmt::TryStar(node) } else { Stmt::Try(node) })
     }
 
     fn return_statement(&mut self) -> Result<Stmt, ParseError> {
@@ -674,7 +798,13 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::LPar)?;
         let mut parameters = Parameters::default();
         let mut seen_default = false;
+        let mut keyword_only = false;
         while !self.at(TokenKind::RPar) && !self.at(TokenKind::EndMarker) {
+            if self.eat(TokenKind::Slash) {
+                parameters.posonlyargs.append(&mut parameters.args);
+                self.eat(TokenKind::Comma);
+                continue;
+            }
             if self.eat(TokenKind::DoubleStar) {
                 let start = self.previous().range.start();
                 let token = self.expect(TokenKind::Name)?;
@@ -685,41 +815,67 @@ impl<'src> Parser<'src> {
                     default: None,
                     type_comment: None,
                 });
+                self.eat(TokenKind::Comma);
+                continue;
             } else if self.eat(TokenKind::Star) {
                 let start = self.previous().range.start();
-                let token = self.expect(TokenKind::Name)?;
-                parameters.vararg = Some(Parameter {
-                    range: TextRange::new(start, token.range.end()),
-                    name: self.name_text(token).into(),
-                    annotation: None,
-                    default: None,
-                    type_comment: None,
-                });
-            } else {
-                let token = self.expect(TokenKind::Name)?;
+                if self.at(TokenKind::Name) {
+                    let token = self.bump();
+                    parameters.vararg = Some(Parameter {
+                        range: TextRange::new(start, token.range.end()),
+                        name: self.name_text(token).into(),
+                        annotation: None,
+                        default: None,
+                        type_comment: None,
+                    });
+                    keyword_only = true;
+                } else {
+                    keyword_only = true;
+                }
+            } else if self.at(TokenKind::Name) {
+                let token = self.bump();
                 let name = self.name_text(token).to_owned();
-                let default = if self.eat(TokenKind::Equal) {
-                    seen_default = true;
+                let annotation = if self.eat(TokenKind::Colon) {
                     Some(Box::new(self.expression(0)?))
                 } else {
-                    if seen_default {
+                    None
+                };
+                let default = if self.eat(TokenKind::Equal) {
+                    if !keyword_only {
+                        seen_default = true;
+                    }
+                    Some(Box::new(self.expression(0)?))
+                } else {
+                    if seen_default && !keyword_only {
                         return Err(
                             self.error_here("non-default argument follows default argument")
                         );
                     }
                     None
                 };
+                let end = default
+                    .as_ref()
+                    .map(|value| value.range().end())
+                    .or_else(|| annotation.as_ref().map(|value| value.range().end()))
+                    .unwrap_or(token.range.end());
                 let parameter = Parameter {
-                    range: TextRange::new(
-                        token.range.start(),
-                        default.as_ref().map(|value| value.range()).unwrap_or(token.range).end(),
-                    ),
+                    range: TextRange::new(token.range.start(), end),
                     name: name.into(),
-                    annotation: None,
-                    default,
+                    annotation,
+                    default: default.clone(),
                     type_comment: None,
                 };
-                parameters.args.push(parameter);
+                if keyword_only {
+                    parameters.kwonlyargs.push(parameter);
+                    parameters.kw_defaults.push(default.map(|value| *value));
+                } else {
+                    if let Some(default) = &default {
+                        parameters.defaults.push((**default).clone());
+                    }
+                    parameters.args.push(parameter);
+                }
+            } else {
+                return Err(self.error_here("expected parameter"));
             }
             if !self.eat(TokenKind::Comma) {
                 break;
@@ -727,6 +883,14 @@ impl<'src> Parser<'src> {
         }
         self.expect(TokenKind::RPar)?;
         Ok(parameters)
+    }
+
+    fn pattern(&mut self) -> Result<Pattern, ParseError> {
+        let previous = self.stop_pattern_guard;
+        self.stop_pattern_guard = true;
+        let expression = self.expression(0)?;
+        self.stop_pattern_guard = previous;
+        Ok(pattern_from_expr(expression))
     }
 
     fn comma_expression(&mut self, first: Expr) -> Result<Expr, ParseError> {
@@ -756,7 +920,7 @@ impl<'src> Parser<'src> {
         let mut left = self.prefix_expression()?;
         loop {
             let kind = self.current().kind;
-            if kind == TokenKind::If && minimum <= 1 {
+            if kind == TokenKind::If && minimum <= 1 && !self.stop_pattern_guard {
                 self.bump();
                 let test = self.expression(0)?;
                 self.expect(TokenKind::Else)?;
@@ -790,11 +954,13 @@ impl<'src> Parser<'src> {
                 continue;
             }
             if !self.stop_in {
-                if let Some(operator) = compare_operator(self, kind) {
+                if let Some((operator, width)) = compare_operator(self, kind) {
                     if minimum > 4 {
                         break;
                     }
-                    self.bump();
+                    for _ in 0..width {
+                        self.bump();
+                    }
                     let right = self.expression(5)?;
                     let mut ops = Vec::new();
                     let mut comparators = Vec::new();
@@ -867,6 +1033,15 @@ impl<'src> Parser<'src> {
     fn prefix_expression(&mut self) -> Result<Expr, ParseError> {
         let token = self.current();
         let result = match token.kind {
+            TokenKind::Star => {
+                self.bump();
+                let value = self.expression(6)?;
+                Expr::Starred(ExprStarred {
+                    range: TextRange::new(token.range.start(), value.range().end()),
+                    value: Box::new(value),
+                    ctx: ExprContext::Load,
+                })
+            }
             TokenKind::Plus | TokenKind::Minus | TokenKind::Tilde | TokenKind::Not => {
                 self.bump();
                 let op = match token.kind {
@@ -875,7 +1050,7 @@ impl<'src> Parser<'src> {
                     TokenKind::Tilde => UnaryOperator::Invert,
                     _ => UnaryOperator::Not,
                 };
-                let operand = self.expression(6)?;
+                let operand = self.expression(if op == UnaryOperator::Not { 4 } else { 6 })?;
                 Expr::UnaryOp(ExprUnaryOp {
                     range: TextRange::new(token.range.start(), operand.range().end()),
                     op,
@@ -950,13 +1125,30 @@ impl<'src> Parser<'src> {
             TokenKind::String { prefix, triple } => self.string_expr(token, prefix, triple),
             TokenKind::LPar => {
                 let first = if self.at(TokenKind::RPar) { None } else { Some(self.expression(0)?) };
+                if let Some(first) = first.as_ref() {
+                    if self.at(TokenKind::For) {
+                        let generators = self.generators()?;
+                        let end = self.expect(TokenKind::RPar)?.range.end();
+                        return Ok(Expr::GeneratorExp(ExprComprehension {
+                            range: TextRange::new(token.range.start(), end),
+                            elt: Box::new(first.clone()),
+                            generators,
+                            key: None,
+                            value: None,
+                        }));
+                    }
+                }
                 let mut items = first.into_iter().collect::<Vec<_>>();
-                let tuple = self.eat(TokenKind::Comma);
+                let mut tuple = self.eat(TokenKind::Comma);
+                if tuple && !self.at(TokenKind::RPar) {
+                    items.push(self.expression(0)?);
+                }
                 while self.eat(TokenKind::Comma) {
                     if self.at(TokenKind::RPar) {
                         break;
                     }
                     items.push(self.expression(0)?);
+                    tuple = true;
                 }
                 let end = self.expect(TokenKind::RPar)?.range.end();
                 if tuple || items.len() != 1 {
@@ -974,10 +1166,25 @@ impl<'src> Parser<'src> {
             }
             TokenKind::LSqb => {
                 let mut items = Vec::new();
-                while !self.at(TokenKind::RSqb) && !self.at(TokenKind::EndMarker) {
-                    items.push(self.expression(0)?);
-                    if !self.eat(TokenKind::Comma) {
-                        break;
+                if !self.at(TokenKind::RSqb) && !self.at(TokenKind::EndMarker) {
+                    let first = self.expression(0)?;
+                    if self.at(TokenKind::For) {
+                        let generators = self.generators()?;
+                        let end = self.expect(TokenKind::RSqb)?.range.end();
+                        return Ok(Expr::ListComp(ExprComprehension {
+                            range: TextRange::new(token.range.start(), end),
+                            elt: Box::new(first),
+                            generators,
+                            key: None,
+                            value: None,
+                        }));
+                    }
+                    items.push(first);
+                    while self.eat(TokenKind::Comma) {
+                        if self.at(TokenKind::RSqb) {
+                            break;
+                        }
+                        items.push(self.expression(0)?);
                     }
                 }
                 let end = self.expect(TokenKind::RSqb)?.range.end();
@@ -1008,6 +1215,25 @@ impl<'src> Parser<'src> {
         if is_dict {
             keys.push(Some(first));
             values.push(self.expression(0)?);
+            if self.at(TokenKind::For) {
+                let generators = self.generators()?;
+                let end = self.expect(TokenKind::RBrace)?.range.end();
+                let key = keys.pop().flatten().unwrap_or(Expr::Invalid(ExprInvalid {
+                    range: TextRange::empty(start),
+                    message: "missing dictionary key".into(),
+                }));
+                let value = values.pop().unwrap_or(Expr::Invalid(ExprInvalid {
+                    range: TextRange::empty(start),
+                    message: "missing dictionary value".into(),
+                }));
+                return Ok(Expr::DictComp(ExprComprehension {
+                    range: TextRange::new(start, end),
+                    elt: Box::new(value.clone()),
+                    generators,
+                    key: Some(Box::new(key)),
+                    value: Some(Box::new(value)),
+                }));
+            }
             while self.eat(TokenKind::Comma) {
                 if self.at(TokenKind::RBrace) {
                     break;
@@ -1019,6 +1245,17 @@ impl<'src> Parser<'src> {
             }
         } else {
             elts.push(first);
+            if self.at(TokenKind::For) {
+                let generators = self.generators()?;
+                let end = self.expect(TokenKind::RBrace)?.range.end();
+                return Ok(Expr::SetComp(ExprComprehension {
+                    range: TextRange::new(start, end),
+                    elt: Box::new(elts.remove(0)),
+                    generators,
+                    key: None,
+                    value: None,
+                }));
+            }
             while self.eat(TokenKind::Comma) {
                 if self.at(TokenKind::RBrace) {
                     break;
@@ -1032,6 +1269,36 @@ impl<'src> Parser<'src> {
         } else {
             Ok(Expr::Set(ExprSet { range: TextRange::new(start, end), elts }))
         }
+    }
+
+    fn generators(&mut self) -> Result<Vec<Comprehension>, ParseError> {
+        let mut generators = Vec::new();
+        while self.eat(TokenKind::For) {
+            let start = self.previous().range.start();
+            let is_async = self.eat(TokenKind::Async);
+            self.stop_in = true;
+            let target = self.expression(0)?;
+            self.stop_in = false;
+            let target = mark_store(target)?;
+            self.expect(TokenKind::In)?;
+            let iter = self.expression(2)?;
+            let mut ifs = Vec::new();
+            while self.eat(TokenKind::If) {
+                ifs.push(self.expression(2)?);
+            }
+            let end = ifs.last().map(Ranged::range).unwrap_or_else(|| iter.range()).end();
+            generators.push(Comprehension {
+                range: TextRange::new(start, end),
+                target,
+                iter,
+                ifs,
+                is_async,
+            });
+        }
+        if generators.is_empty() {
+            return Err(self.error_here("expected comprehension for clause"));
+        }
+        Ok(generators)
     }
 
     fn postfix(&mut self, mut expression: Expr) -> Result<Expr, ParseError> {
@@ -1272,6 +1539,16 @@ impl<'src> Parser<'src> {
             )
         })
     }
+    fn word_is(&self, word: &str) -> bool {
+        self.at(TokenKind::Name) && &self.src[self.current().range] == word
+    }
+    fn at_word(&self, word: &str) -> bool {
+        self.word_is(word)
+    }
+    fn looks_like_type_alias(&self) -> bool {
+        self.peek_kind(1) == TokenKind::Name
+            && matches!(self.peek_kind(2), TokenKind::Equal | TokenKind::LSqb)
+    }
     fn previous(&self) -> Token {
         self.tokens.get(self.position.saturating_sub(1)).copied().unwrap_or_else(|| self.current())
     }
@@ -1416,6 +1693,28 @@ fn mark_store(expression: Expr) -> Result<Expr, ParseError> {
     }
 }
 
+fn pattern_from_expr(expression: Expr) -> Pattern {
+    let range = expression.range();
+    match expression {
+        Expr::Name(node) if node.id.as_ref() == "_" => {
+            Pattern::As(PatternAs { range, pattern: None, name: None })
+        }
+        Expr::Name(node) => Pattern::As(PatternAs { range, pattern: None, name: Some(node.id) }),
+        Expr::BooleanLiteral(_) | Expr::NoneLiteral(_) => {
+            Pattern::Singleton(PatternSingleton { range, value: expression })
+        }
+        Expr::List(node) | Expr::Tuple(node) => Pattern::Sequence(PatternSequence {
+            range,
+            patterns: node.elts.into_iter().map(pattern_from_expr).collect(),
+        }),
+        Expr::BinOp(node) if node.op == BinaryOperator::BitOr => {
+            let patterns = vec![pattern_from_expr(*node.left), pattern_from_expr(*node.right)];
+            Pattern::Or(PatternOr { range, patterns })
+        }
+        other => Pattern::Value(PatternValue { range, value: other }),
+    }
+}
+
 fn binary_operator(kind: TokenKind) -> Option<(BinaryOperator, u8, bool)> {
     Some(match kind {
         TokenKind::Vbar => (BinaryOperator::BitOr, 5, false),
@@ -1452,17 +1751,18 @@ fn aug_operator(kind: TokenKind) -> Option<BinaryOperator> {
         _ => None,
     })
 }
-fn compare_operator(parser: &Parser<'_>, kind: TokenKind) -> Option<CompareOperator> {
+fn compare_operator(parser: &Parser<'_>, kind: TokenKind) -> Option<(CompareOperator, usize)> {
     match kind {
-        TokenKind::EqEqual => Some(CompareOperator::Eq),
-        TokenKind::NotEqual => Some(CompareOperator::NotEq),
-        TokenKind::Less => Some(CompareOperator::Lt),
-        TokenKind::LessEqual => Some(CompareOperator::LtE),
-        TokenKind::Greater => Some(CompareOperator::Gt),
-        TokenKind::GreaterEqual => Some(CompareOperator::GtE),
-        TokenKind::In => Some(CompareOperator::In),
-        TokenKind::Is if parser.peek_kind(1) != TokenKind::Not => Some(CompareOperator::Is),
-        TokenKind::Not if parser.peek_kind(1) == TokenKind::In => Some(CompareOperator::NotIn),
+        TokenKind::EqEqual => Some((CompareOperator::Eq, 1)),
+        TokenKind::NotEqual => Some((CompareOperator::NotEq, 1)),
+        TokenKind::Less => Some((CompareOperator::Lt, 1)),
+        TokenKind::LessEqual => Some((CompareOperator::LtE, 1)),
+        TokenKind::Greater => Some((CompareOperator::Gt, 1)),
+        TokenKind::GreaterEqual => Some((CompareOperator::GtE, 1)),
+        TokenKind::In => Some((CompareOperator::In, 1)),
+        TokenKind::Is if parser.peek_kind(1) == TokenKind::Not => Some((CompareOperator::IsNot, 2)),
+        TokenKind::Is => Some((CompareOperator::Is, 1)),
+        TokenKind::Not if parser.peek_kind(1) == TokenKind::In => Some((CompareOperator::NotIn, 2)),
         _ => None,
     }
 }

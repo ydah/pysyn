@@ -60,3 +60,23 @@ fn tokenizes_and_parses_nested_f_strings() {
     assert!(dump.contains("FormattedValue(value=Name"));
     assert!(dump.contains("conversion=114"));
 }
+
+#[test]
+fn parses_soft_keyword_statement_boundaries() {
+    let source = "match value:\n    case 1:\n        result = 1\ntype Alias = list[int]\nmatch = 2\nvalue = type(thing)\n";
+    let module = pysyn::parse_module(source).expect("valid soft-keyword source");
+    assert!(matches!(module.body[0], Stmt::Match(_)));
+    assert!(matches!(module.body[1], Stmt::TypeAlias(_)));
+    assert!(matches!(module.body[2], Stmt::Assign(_)));
+    assert!(matches!(module.body[3], Stmt::Assign(_)));
+}
+
+#[test]
+fn parses_comprehensions_and_parameter_sections() {
+    let module = pysyn::parse_module("def f(x: int = 1, /, *args, flag: bool = True, **kwargs):\n    return [x for x in args if x]\n").expect("valid function");
+    let Stmt::FunctionDef(function) = &module.body[0] else { panic!("expected function") };
+    assert_eq!(function.args.posonlyargs.len(), 1);
+    assert_eq!(function.args.kwonlyargs.len(), 1);
+    let Stmt::Return(return_stmt) = &function.body[0] else { panic!("expected return") };
+    assert!(matches!(&**return_stmt.value.as_ref().expect("return value"), Expr::ListComp(_)));
+}

@@ -83,7 +83,7 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             output.push_str(if node.simple { "1)" } else { "0)" });
         }
         Stmt::Return(node) => {
-            output.push_str("Return(return=");
+            output.push_str("Return(value=");
             if let Some(value) = &node.value {
                 dump_expr(value, options, level, output);
             } else {
@@ -157,6 +157,8 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
                 "FunctionDef(name="
             });
             output.push_str(&repr_string(&node.name));
+            output.push_str(", args=");
+            dump_parameters(&node.args, options, level, output);
             output.push_str(", body=[");
             for (index, child) in node.body.iter().enumerate() {
                 if index > 0 {
@@ -164,7 +166,20 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
                 }
                 dump_stmt(child, options, level + 1, output);
             }
-            output.push_str("])");
+            output.push_str("], decorator_list=[");
+            for (index, decorator) in node.decorator_list.iter().enumerate() {
+                if index > 0 {
+                    output.push_str(", ");
+                }
+                dump_expr(decorator, options, level, output);
+            }
+            output.push_str("], returns=");
+            if let Some(returns) = &node.returns {
+                dump_expr(returns, options, level, output);
+            } else {
+                output.push_str("None");
+            }
+            output.push(')');
         }
         Stmt::ClassDef(node) => {
             output.push_str("ClassDef(name=");
@@ -261,13 +276,260 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             }
             output.push_str("], body=[])");
         }
-        Stmt::Try(_) | Stmt::TryStar(_) => output
-            .push_str(if matches!(statement, Stmt::TryStar(_)) { "TryStar()" } else { "Try()" }),
-        Stmt::AugAssign(_) => output.push_str("AugAssign()"),
-        Stmt::Match(_) => output.push_str("Match()"),
-        Stmt::TypeAlias(_) => output.push_str("TypeAlias()"),
+        Stmt::Try(node) | Stmt::TryStar(node) => {
+            output.push_str(if matches!(statement, Stmt::TryStar(_)) {
+                "TryStar(body=["
+            } else {
+                "Try(body=["
+            });
+            for (index, child) in node.body.iter().enumerate() {
+                if index > 0 {
+                    output.push_str(", ");
+                }
+                dump_stmt(child, options, level + 1, output);
+            }
+            output.push_str("], handlers=[");
+            for (index, handler) in node.handlers.iter().enumerate() {
+                if index > 0 {
+                    output.push_str(", ");
+                }
+                output.push_str("ExceptHandler(type=");
+                if let Some(typ) = &handler.typ {
+                    dump_expr(typ, options, level, output);
+                } else {
+                    output.push_str("None");
+                }
+                output.push_str(", name=");
+                if let Some(name) = &handler.name {
+                    output.push_str(&repr_string(name));
+                } else {
+                    output.push_str("None");
+                }
+                output.push_str(", body=[");
+                for (child_index, child) in handler.body.iter().enumerate() {
+                    if child_index > 0 {
+                        output.push_str(", ");
+                    }
+                    dump_stmt(child, options, level + 1, output);
+                }
+                output.push_str("])");
+            }
+            output.push_str("], orelse=[");
+            for (index, child) in node.orelse.iter().enumerate() {
+                if index > 0 {
+                    output.push_str(", ");
+                }
+                dump_stmt(child, options, level + 1, output);
+            }
+            output.push_str("], finalbody=[");
+            for (index, child) in node.finalbody.iter().enumerate() {
+                if index > 0 {
+                    output.push_str(", ");
+                }
+                dump_stmt(child, options, level + 1, output);
+            }
+            output.push_str("])");
+        }
+        Stmt::AugAssign(node) => {
+            output.push_str("AugAssign(target=");
+            dump_expr(&node.target, options, level, output);
+            output.push_str(", op=");
+            output.push_str(binary_name(node.op));
+            output.push_str(", value=");
+            dump_expr(&node.value, options, level, output);
+            output.push(')');
+        }
+        Stmt::Match(node) => {
+            output.push_str("Match(subject=");
+            dump_expr(&node.subject, options, level, output);
+            output.push_str(", cases=[");
+            for (index, case) in node.cases.iter().enumerate() {
+                if index > 0 {
+                    output.push_str(", ");
+                }
+                output.push_str("match_case(pattern=");
+                dump_pattern(&case.pattern, options, level, output);
+                output.push_str(", guard=");
+                if let Some(guard) = &case.guard {
+                    dump_expr(guard, options, level, output);
+                } else {
+                    output.push_str("None");
+                }
+                output.push_str(", body=[");
+                for (child_index, child) in case.body.iter().enumerate() {
+                    if child_index > 0 {
+                        output.push_str(", ");
+                    }
+                    dump_stmt(child, options, level + 1, output);
+                }
+                output.push_str("])");
+            }
+            output.push_str("])");
+        }
+        Stmt::TypeAlias(node) => {
+            output.push_str("TypeAlias(name=");
+            dump_expr(&node.name, options, level, output);
+            output.push_str(", type_params=[], value=");
+            dump_expr(&node.value, options, level, output);
+            output.push(')');
+        }
         Stmt::Invalid(_) => output.push_str("Invalid()"),
     }
+}
+
+fn dump_parameters(
+    parameters: &Parameters,
+    options: &DumpOptions,
+    level: usize,
+    output: &mut String,
+) {
+    output.push_str("arguments(posonlyargs=[");
+    dump_parameter_list(&parameters.posonlyargs, options, level, output);
+    output.push_str("], args=[");
+    dump_parameter_list(&parameters.args, options, level, output);
+    output.push_str("], vararg=");
+    if let Some(parameter) = &parameters.vararg {
+        dump_parameter(parameter, options, level, output);
+    } else {
+        output.push_str("None");
+    }
+    output.push_str(", kwonlyargs=[");
+    dump_parameter_list(&parameters.kwonlyargs, options, level, output);
+    output.push_str("], kw_defaults=[");
+    for (index, value) in parameters.kw_defaults.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        if let Some(value) = value {
+            dump_expr(value, options, level, output);
+        } else {
+            output.push_str("None");
+        }
+    }
+    output.push_str("], kwarg=");
+    if let Some(parameter) = &parameters.kwarg {
+        dump_parameter(parameter, options, level, output);
+    } else {
+        output.push_str("None");
+    }
+    output.push_str(", defaults=[");
+    for (index, value) in parameters.defaults.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        dump_expr(value, options, level, output);
+    }
+    output.push_str("])");
+}
+
+fn dump_parameter_list(
+    parameters: &[Parameter],
+    options: &DumpOptions,
+    level: usize,
+    output: &mut String,
+) {
+    for (index, parameter) in parameters.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        dump_parameter(parameter, options, level, output);
+    }
+}
+
+fn dump_parameter(parameter: &Parameter, options: &DumpOptions, level: usize, output: &mut String) {
+    output.push_str("arg(arg=");
+    output.push_str(&repr_string(&parameter.name));
+    output.push_str(", annotation=");
+    if let Some(annotation) = &parameter.annotation {
+        dump_expr(annotation, options, level, output);
+    } else {
+        output.push_str("None");
+    }
+    output.push_str(", type_comment=None)");
+}
+
+fn dump_pattern(pattern: &Pattern, options: &DumpOptions, level: usize, output: &mut String) {
+    match pattern {
+        Pattern::As(node) => {
+            output.push_str("MatchAs(name=");
+            if let Some(name) = &node.name {
+                output.push_str(&repr_string(name));
+            } else {
+                output.push_str("None");
+            }
+            output.push_str(", pattern=None)");
+        }
+        Pattern::Singleton(node) => {
+            output.push_str("MatchSingleton(value=");
+            dump_expr(&node.value, options, level, output);
+            output.push(')');
+        }
+        Pattern::Value(node) => {
+            output.push_str("MatchValue(value=");
+            dump_expr(&node.value, options, level, output);
+            output.push(')');
+        }
+        Pattern::Sequence(node) => {
+            output.push_str("MatchSequence(patterns=[");
+            for (index, child) in node.patterns.iter().enumerate() {
+                if index > 0 {
+                    output.push_str(", ");
+                }
+                dump_pattern(child, options, level, output);
+            }
+            output.push_str("])");
+        }
+        Pattern::Or(node) => {
+            output.push_str("MatchOr(patterns=[");
+            for (index, child) in node.patterns.iter().enumerate() {
+                if index > 0 {
+                    output.push_str(", ");
+                }
+                dump_pattern(child, options, level, output);
+            }
+            output.push_str("])");
+        }
+        Pattern::Star(node) => {
+            output.push_str("MatchStar(name=");
+            if let Some(name) = &node.name {
+                output.push_str(&repr_string(name));
+            } else {
+                output.push_str("None");
+            }
+            output.push(')');
+        }
+        Pattern::Mapping(_) => output.push_str("MatchMapping()"),
+        Pattern::Class(_) => output.push_str("MatchClass()"),
+        Pattern::Invalid(_) => output.push_str("Invalid()"),
+    }
+}
+
+fn dump_generators(
+    generators: &[Comprehension],
+    options: &DumpOptions,
+    level: usize,
+    output: &mut String,
+) {
+    output.push('[');
+    for (index, generator) in generators.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        output.push_str("comprehension(target=");
+        dump_expr(&generator.target, options, level, output);
+        output.push_str(", iter=");
+        dump_expr(&generator.iter, options, level, output);
+        output.push_str(", ifs=[");
+        for (condition_index, condition) in generator.ifs.iter().enumerate() {
+            if condition_index > 0 {
+                output.push_str(", ");
+            }
+            dump_expr(condition, options, level, output);
+        }
+        output.push_str("], is_async=");
+        output.push_str(if generator.is_async { "1)" } else { "0)" });
+    }
+    output.push(']');
 }
 
 fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mut String) {
@@ -458,10 +720,65 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
         Expr::Await(_) => output.push_str("Await()"),
         Expr::Yield(_) => output.push_str("Yield()"),
         Expr::YieldFrom(_) => output.push_str("YieldFrom()"),
-        Expr::ListComp(_) | Expr::SetComp(_) | Expr::DictComp(_) | Expr::GeneratorExp(_) => {
-            output.push_str("comprehension()")
+        Expr::ListComp(node) => {
+            output.push_str("ListComp(elt=");
+            dump_expr(&node.elt, options, level, output);
+            output.push_str(", generators=");
+            dump_generators(&node.generators, options, level, output);
+            output.push(')');
         }
-        Expr::Slice(_) => output.push_str("Slice()"),
+        Expr::SetComp(node) => {
+            output.push_str("SetComp(elt=");
+            dump_expr(&node.elt, options, level, output);
+            output.push_str(", generators=");
+            dump_generators(&node.generators, options, level, output);
+            output.push(')');
+        }
+        Expr::DictComp(node) => {
+            output.push_str("DictComp(key=");
+            if let Some(key) = &node.key {
+                dump_expr(key, options, level, output);
+            } else {
+                output.push_str("None");
+            }
+            output.push_str(", value=");
+            if let Some(value) = &node.value {
+                dump_expr(value, options, level, output);
+            } else {
+                dump_expr(&node.elt, options, level, output);
+            }
+            output.push_str(", generators=");
+            dump_generators(&node.generators, options, level, output);
+            output.push(')');
+        }
+        Expr::GeneratorExp(node) => {
+            output.push_str("GeneratorExp(elt=");
+            dump_expr(&node.elt, options, level, output);
+            output.push_str(", generators=");
+            dump_generators(&node.generators, options, level, output);
+            output.push(')');
+        }
+        Expr::Slice(node) => {
+            output.push_str("Slice(lower=");
+            if let Some(value) = &node.lower {
+                dump_expr(value, options, level, output);
+            } else {
+                output.push_str("None");
+            }
+            output.push_str(", upper=");
+            if let Some(value) = &node.upper {
+                dump_expr(value, options, level, output);
+            } else {
+                output.push_str("None");
+            }
+            output.push_str(", step=");
+            if let Some(value) = &node.step {
+                dump_expr(value, options, level, output);
+            } else {
+                output.push_str("None");
+            }
+            output.push(')');
+        }
         Expr::Invalid(_) => output.push_str("Invalid()"),
     }
     let _ = (options, level);
@@ -786,19 +1103,21 @@ impl Unparser {
                 "{{{}}}",
                 node.elts.iter().map(|value| self.expression(value)).collect::<Vec<_>>().join(", ")
             ),
-            Expr::Dict(node) => node
-                .keys
-                .iter()
-                .zip(&node.values)
-                .map(|(key, value)| {
-                    format!(
-                        "{}: {}",
-                        key.as_ref().map(|key| self.expression(key)).unwrap_or_default(),
-                        self.expression(value)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", "),
+            Expr::Dict(node) => format!(
+                "{{{}}}",
+                node.keys
+                    .iter()
+                    .zip(&node.values)
+                    .map(|(key, value)| {
+                        if let Some(key) = key {
+                            format!("{}: {}", self.expression(key), self.expression(value))
+                        } else {
+                            format!("**{}", self.expression(value))
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Expr::IfExp(node) => format!(
                 "{} if {} else {}",
                 self.expression(&node.body),
