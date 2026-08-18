@@ -1747,12 +1747,15 @@ impl<'src> Parser<'src> {
             end = next.range.end();
         }
         if prefix.is_format() {
-            return Ok(parse_fstring(
-                self.src,
-                TextRange::new(start, end),
-                &parts[0].value,
-                self.options.version,
-            ));
+            let mut values = Vec::new();
+            for part in parts {
+                if let Expr::FString(node) =
+                    parse_fstring(self.src, part.range, &part.value, self.options.version)
+                {
+                    values.extend(node.values);
+                }
+            }
+            return Ok(Expr::FString(ExprFString { range: TextRange::new(start, end), values }));
         }
         if prefix.is_bytes() {
             return Ok(Expr::BytesLiteral(ExprString {
@@ -1908,9 +1911,7 @@ impl<'src> Parser<'src> {
         }
     }
     fn consume_line_end(&mut self) {
-        if self.at(TokenKind::Semi) {
-            self.bump();
-        } else {
+        if !self.at(TokenKind::Semi) {
             self.eat(TokenKind::Newline);
         }
     }

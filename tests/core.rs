@@ -107,6 +107,17 @@ fn handles_raw_strings_and_backslash_continuations() {
 }
 
 #[test]
+fn parses_fstring_literal_concatenation_and_inline_suites() {
+    let source = concat!(
+        "key = (rf\"Software\\\\Python\\\\{sys.winver}\" r\"\\\\Help\")\n",
+        "if enabled: first = 1; second = 2\n",
+    );
+    let module = pysyn::parse_module(source).expect("valid f-string and suite source");
+    let Stmt::If(statement) = &module.body[1] else { panic!("expected if") };
+    assert_eq!(statement.body.len(), 2);
+}
+
+#[test]
 fn detects_python_source_encoding_markers() {
     assert_eq!(
         pysyn::detect_encoding(b"# coding: cp932\n"),

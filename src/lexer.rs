@@ -464,7 +464,11 @@ impl<'src> Scanner<'src> {
             return None;
         }
         let flags = StringPrefix::parse(prefix)?;
-        let end = self.scan_string_body(cursor, flags.is_raw());
+        let end = if flags.is_format() {
+            self.scan_fstring_body(cursor)
+        } else {
+            self.scan_string_body(cursor, flags.is_raw())
+        };
         let triple = self.src.as_bytes().get(cursor..cursor + 3)
             == Some(if quote == b'\'' { b"'''" } else { b"\"\"\"" });
         Some((TokenKind::String { prefix: flags, triple }, end))
@@ -510,6 +514,100 @@ impl<'src> Scanner<'src> {
                 "unterminated triple-quoted string literal"
             } else {
                 "unterminated string literal"
+            },
+        );
+        self.src.len()
+    }
+
+    fn scan_fstring_body(&mut self, quote_start: usize) -> usize {
+        let quote = self.src.as_bytes()[quote_start];
+        let triple = self.src.as_bytes().get(quote_start..quote_start + 3)
+            == Some(if quote == b'\'' { b"'''" } else { b"\"\"\"" });
+        let delimiter = if triple { 3 } else { 1 };
+        let mut cursor = quote_start + delimiter;
+        let mut field_depth = 0u32;
+        let mut string_quote = None;
+        let mut string_triple = false;
+        while cursor < self.src.len() {
+            let byte = self.src.as_bytes()[cursor];
+            if let Some(active_quote) = string_quote {
+                if byte == b'\\' {
+                    cursor += 1;
+                    if cursor < self.src.len() {
+                        cursor += self.src[cursor..].chars().next().unwrap().len_utf8();
+                    }
+                } else if string_triple
+                    && self.src.as_bytes().get(cursor..cursor + 3)
+                        == Some(if active_quote == b'\'' { b"'''" } else { b"\"\"\"" })
+                {
+                    string_quote = None;
+                    cursor += 3;
+                } else if !string_triple && byte == active_quote {
+                    string_quote = None;
+                    cursor += 1;
+                } else {
+                    cursor += self.src[cursor..].chars().next().unwrap().len_utf8();
+                }
+                continue;
+            }
+            if field_depth == 0 {
+                if byte == b'\\' {
+                    cursor += 1;
+                    if self.src.as_bytes().get(cursor) == Some(&quote) {
+                        cursor += self.src[cursor..].chars().next().unwrap().len_utf8();
+                    }
+                    continue;
+                }
+                if self.src.as_bytes().get(cursor..cursor + delimiter)
+                    == Some(if quote == b'\'' {
+                        if triple {
+                            b"'''"
+                        } else {
+                            b"'"
+                        }
+                    } else if triple {
+                        b"\"\"\""
+                    } else {
+                        b"\""
+                    })
+                {
+                    return cursor + delimiter;
+                }
+                if byte == b'{' && self.src.as_bytes().get(cursor + 1) != Some(&b'{') {
+                    field_depth = 1;
+                    cursor += 1;
+                } else if byte == b'{' || byte == b'}' {
+                    cursor += 2;
+                } else {
+                    cursor += self.src[cursor..].chars().next().unwrap().len_utf8();
+                }
+            } else {
+                match byte {
+                    b'\'' | b'"' => {
+                        string_quote = Some(byte);
+                        string_triple = self.src.as_bytes().get(cursor..cursor + 3)
+                            == Some(if byte == b'\'' { b"'''" } else { b"\"\"\"" });
+                        cursor += if string_triple { 3 } else { 1 };
+                    }
+                    b'{' => {
+                        field_depth += 1;
+                        cursor += 1;
+                    }
+                    b'}' => {
+                        field_depth = field_depth.saturating_sub(1);
+                        cursor += 1;
+                    }
+                    _ => cursor += self.src[cursor..].chars().next().unwrap().len_utf8(),
+                }
+            }
+        }
+        self.error(
+            quote_start,
+            self.src.len(),
+            if triple {
+                "unterminated triple-quoted f-string literal"
+            } else {
+                "unterminated f-string literal"
             },
         );
         self.src.len()
