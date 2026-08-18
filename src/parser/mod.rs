@@ -1500,12 +1500,15 @@ fn parse_fstring(_src: &str, range: TextRange, value: &str, version: PythonVersi
                 end += 1;
             }
             let inner = value.get(start..end.saturating_sub(1)).unwrap_or("");
-            if let Ok(expr) = parse_expression(inner) {
+            let (expression_text, conversion, format_spec) = split_fstring_field(inner);
+            if let Ok(expr) = parse_expression(expression_text) {
+                let format_spec =
+                    format_spec.map(|spec| Box::new(parse_fstring("", range, spec, version)));
                 values.push(Expr::FormattedValue(ExprFormattedValue {
                     range,
                     value: Box::new(expr),
-                    conversion: None,
-                    format_spec: None,
+                    conversion,
+                    format_spec,
                 }));
             }
             index = end;
@@ -1534,4 +1537,27 @@ fn parse_fstring(_src: &str, range: TextRange, value: &str, version: PythonVersi
     }
     let _ = version;
     Expr::FString(ExprFString { range, values })
+}
+
+fn split_fstring_field(field: &str) -> (&str, Option<char>, Option<&str>) {
+    let mut nesting = 0u32;
+    let mut conversion_at = None;
+    let mut format_at = None;
+    for (index, character) in field.char_indices() {
+        match character {
+            '[' | '(' | '{' => nesting += 1,
+            ']' | ')' | '}' => nesting = nesting.saturating_sub(1),
+            '!' if nesting == 0 && conversion_at.is_none() => conversion_at = Some(index),
+            ':' if nesting == 0 => {
+                format_at = Some(index);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let expression_end = conversion_at.or(format_at).unwrap_or(field.len());
+    let expression = field[..expression_end].trim();
+    let conversion = conversion_at.and_then(|index| field[index + 1..].chars().next());
+    let format_spec = format_at.map(|index| field[index + 1..].trim());
+    (expression, conversion, format_spec)
 }

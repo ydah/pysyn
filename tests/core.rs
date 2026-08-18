@@ -48,3 +48,15 @@ fn keeps_comments_as_side_table() {
     let parsed = parse("# header\nx = 1  # inline\n", ParseOptions::default());
     assert_eq!(parsed.comments.len(), 2);
 }
+
+#[test]
+fn tokenizes_and_parses_nested_f_strings() {
+    let source = "f\"a{x!r:>{width}}b\"";
+    let tokens = pysyn::lexer::tokenize(source).filter_map(Result::ok).collect::<Vec<_>>();
+    assert!(matches!(tokens.first().map(|token| token.kind), Some(TokenKind::FStringStart { .. })));
+    assert!(tokens.iter().any(|token| matches!(token.kind, TokenKind::FStringEnd { .. })));
+    let module = pysyn::parse_module(&format!("value = {source}\n")).expect("valid f-string");
+    let dump = pysyn::printer::dump(&module, Default::default());
+    assert!(dump.contains("FormattedValue(value=Name"));
+    assert!(dump.contains("conversion=114"));
+}

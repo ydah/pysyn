@@ -173,7 +173,15 @@ impl<'src> Scanner<'src> {
             return;
         }
         if let Some((kind, end)) = self.scan_prefixed_string() {
-            self.emit(kind, self.position, end);
+            if let TokenKind::String { prefix, triple } = kind {
+                if prefix.is_format() && self.options.mode == LexMode::Full {
+                    self.emit_fstring(self.position, end, prefix, triple);
+                } else {
+                    self.emit(kind, self.position, end);
+                }
+            } else {
+                self.emit(kind, self.position, end);
+            }
             self.position = end;
             return;
         }
@@ -490,6 +498,70 @@ impl<'src> Scanner<'src> {
         self.src.len()
     }
 
+    fn emit_fstring(&mut self, start: usize, end: usize, prefix: StringPrefix, triple: bool) {
+        let raw = &self.src[start..end];
+        let quote_offset = raw.find(['\'', '"']).unwrap_or(0);
+        let delimiter = if triple { 3 } else { 1 };
+        let body_start = start + quote_offset + delimiter;
+        let body_end = end.saturating_sub(delimiter);
+        self.emit(TokenKind::FStringStart { prefix, triple }, start, body_start);
+        let mut cursor = body_start;
+        let mut literal_start = body_start;
+        while cursor < body_end {
+            let byte = self.src.as_bytes()[cursor];
+            if byte == b'{' && self.src.as_bytes().get(cursor + 1) != Some(&b'{') {
+                if literal_start < cursor {
+                    self.emit(TokenKind::FStringMiddle, literal_start, cursor);
+                }
+                self.emit(TokenKind::LBrace, cursor, cursor + 1);
+                let expression_start = cursor + 1;
+                let expression_end = matching_fstring_brace(self.src, expression_start, body_end);
+                self.emit_fstring_expression(expression_start, expression_end);
+                if expression_end < body_end {
+                    self.emit(TokenKind::RBrace, expression_end, expression_end + 1);
+                }
+                cursor = expression_end.saturating_add(1);
+                literal_start = cursor;
+            } else if (byte == b'{' || byte == b'}')
+                && self.src.as_bytes().get(cursor + 1) == Some(&byte)
+            {
+                cursor += 2;
+            } else {
+                cursor += self.src[cursor..].chars().next().map_or(1, char::len_utf8);
+            }
+        }
+        if literal_start < body_end {
+            self.emit(TokenKind::FStringMiddle, literal_start, body_end);
+        }
+        self.emit(TokenKind::FStringEnd { prefix, triple }, body_end, end);
+    }
+
+    fn emit_fstring_expression(&mut self, start: usize, end: usize) {
+        if start >= end {
+            return;
+        }
+        let expression = &self.src[start..end];
+        for item in tokenize_with(
+            expression,
+            LexOptions { mode: LexMode::Parse, version: self.options.version },
+        ) {
+            let Ok(token) = item else { continue };
+            if matches!(
+                token.kind,
+                TokenKind::EndMarker | TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent
+            ) {
+                continue;
+            }
+            self.items.push(Ok(Token::new(
+                token.kind,
+                TextRange::from_usize(
+                    start + token.range.start().as_usize(),
+                    start + token.range.end().as_usize(),
+                ),
+            )));
+        }
+    }
+
     fn emit(&mut self, kind: TokenKind, start: usize, end: usize) {
         self.items.push(Ok(Token::new(kind, TextRange::from_usize(start, end))));
     }
@@ -507,6 +579,35 @@ impl<'src> Scanner<'src> {
 
 fn is_identifier_start(character: char) -> bool {
     character == '_' || unicode_ident::is_xid_start(character)
+}
+
+fn matching_fstring_brace(source: &str, start: usize, end: usize) -> usize {
+    let mut depth = 1u32;
+    let mut cursor = start;
+    while cursor < end {
+        match source.as_bytes()[cursor] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return cursor;
+                }
+            }
+            b'\'' | b'"' => {
+                let quote = source.as_bytes()[cursor];
+                cursor += 1;
+                while cursor < end && source.as_bytes()[cursor] != quote {
+                    if source.as_bytes()[cursor] == b'\\' {
+                        cursor += 1;
+                    }
+                    cursor += source[cursor..].chars().next().map_or(1, char::len_utf8);
+                }
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    end
 }
 fn is_identifier_continue(character: char) -> bool {
     character == '_' || unicode_ident::is_xid_continue(character)

@@ -275,7 +275,9 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
         Expr::Name(node) => {
             output.push_str("Name(id=");
             output.push_str(&repr_string(&node.id));
-            output.push_str(", ctx=Load)");
+            output.push_str(", ctx=");
+            output.push_str(context_name(node.ctx));
+            output.push(')');
         }
         Expr::NumberLiteral(node) => {
             output.push_str("Constant(value=");
@@ -367,17 +369,25 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
             dump_expr(&node.value, options, level, output);
             output.push_str(", attr=");
             output.push_str(&repr_string(&node.attr));
-            output.push_str(", ctx=Load)");
+            output.push_str(", ctx=");
+            output.push_str(context_name(node.ctx));
+            output.push(')');
         }
         Expr::Subscript(node) => {
             output.push_str("Subscript(value=");
             dump_expr(&node.value, options, level, output);
             output.push_str(", slice=");
             dump_expr(&node.slice, options, level, output);
-            output.push_str(", ctx=Load)");
+            output.push_str(", ctx=");
+            output.push_str(context_name(node.ctx));
+            output.push(')');
         }
-        Expr::List(node) => dump_sequence("List", &node.elts, options, level, output),
-        Expr::Tuple(node) => dump_sequence("Tuple", &node.elts, options, level, output),
+        Expr::List(node) => {
+            dump_sequence_with_context("List", &node.elts, node.ctx, options, level, output)
+        }
+        Expr::Tuple(node) => {
+            dump_sequence_with_context("Tuple", &node.elts, node.ctx, options, level, output)
+        }
         Expr::Set(node) => dump_sequence("Set", &node.elts, options, level, output),
         Expr::Dict(node) => {
             output.push_str("Dict(keys=[");
@@ -412,10 +422,37 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
         Expr::Starred(node) => {
             output.push_str("Starred(value=");
             dump_expr(&node.value, options, level, output);
-            output.push_str(", ctx=Load)");
+            output.push_str(", ctx=");
+            output.push_str(context_name(node.ctx));
+            output.push(')');
         }
-        Expr::FString(_) => output.push_str("JoinedStr(values=[])"),
-        Expr::FormattedValue(_) => output.push_str("FormattedValue()"),
+        Expr::FString(node) => {
+            output.push_str("JoinedStr(values=[");
+            for (index, value) in node.values.iter().enumerate() {
+                if index > 0 {
+                    output.push_str(", ");
+                }
+                dump_expr(value, options, level, output);
+            }
+            output.push_str("])");
+        }
+        Expr::FormattedValue(node) => {
+            output.push_str("FormattedValue(value=");
+            dump_expr(&node.value, options, level, output);
+            output.push_str(", conversion=");
+            output.push_str(
+                &node
+                    .conversion
+                    .map_or_else(|| "-1".to_owned(), |value| (value as u32).to_string()),
+            );
+            output.push_str(", format_spec=");
+            if let Some(spec) = &node.format_spec {
+                dump_expr(spec, options, level, output);
+            } else {
+                output.push_str("None");
+            }
+            output.push(')');
+        }
         Expr::Lambda(_) => output.push_str("Lambda()"),
         Expr::NamedExpr(_) => output.push_str("NamedExpr()"),
         Expr::Await(_) => output.push_str("Await()"),
@@ -447,6 +484,28 @@ fn dump_sequence(
     }
     output.push_str("])");
 }
+
+fn dump_sequence_with_context(
+    name: &str,
+    values: &[Expr],
+    context: ExprContext,
+    options: &DumpOptions,
+    level: usize,
+    output: &mut String,
+) {
+    output.push_str(name);
+    output.push_str("(elts=[");
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        dump_expr(value, options, level, output);
+    }
+    output.push_str("], ctx=");
+    output.push_str(context_name(context));
+    output.push(')');
+}
+
 fn binary_name(operator: BinaryOperator) -> &'static str {
     match operator {
         BinaryOperator::Add => "Add()",
@@ -484,6 +543,13 @@ fn compare_name(operator: CompareOperator) -> &'static str {
         CompareOperator::NotIn => "NotIn()",
         CompareOperator::Is => "Is()",
         CompareOperator::IsNot => "IsNot()",
+    }
+}
+fn context_name(context: ExprContext) -> &'static str {
+    match context {
+        ExprContext::Load => "Load()",
+        ExprContext::Store => "Store()",
+        ExprContext::Del => "Del()",
     }
 }
 fn number_repr(number: &Number) -> String {
@@ -739,14 +805,32 @@ impl Unparser {
                 self.expression(&node.test),
                 self.expression(&node.orelse)
             ),
-            Expr::FString(node) => format!(
-                "f\"{}\"",
-                node.values.iter().map(|value| self.expression(value)).collect::<Vec<_>>().join("")
-            ),
+            Expr::FString(node) => format!("f\"{}\"", self.fstring_text(&node.values)),
             Expr::FormattedValue(node) => format!("{{{}}}", self.expression(&node.value)),
             Expr::Starred(node) => format!("*{}", self.expression(&node.value)),
             _ => "...".into(),
         }
+    }
+
+    fn fstring_text(&self, values: &[Expr]) -> String {
+        values
+            .iter()
+            .map(|value| match value {
+                Expr::StringLiteral(node) => node.value.to_str().into_owned(),
+                Expr::FormattedValue(node) => {
+                    let conversion =
+                        node.conversion.map_or(String::new(), |value| format!("!{value}"));
+                    let spec = node.format_spec.as_ref().map_or(String::new(), |value| match value
+                        .as_ref()
+                    {
+                        Expr::FString(node) => format!(":{}", self.fstring_text(&node.values)),
+                        other => format!(":{}", self.expression(other)),
+                    });
+                    format!("{{{}{conversion}{spec}}}", self.expression(&node.value))
+                }
+                _ => self.expression(value),
+            })
+            .collect()
     }
 }
 

@@ -123,7 +123,7 @@ pub enum TokenKind {
     String { prefix: StringPrefix, triple: bool },
     FStringStart { prefix: StringPrefix, triple: bool },
     FStringMiddle,
-    FStringEnd,
+    FStringEnd { prefix: StringPrefix, triple: bool },
     False,
     None,
     True,
