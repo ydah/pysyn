@@ -497,6 +497,12 @@ impl<'src> Parser<'src> {
     fn type_alias_statement(&mut self) -> Result<Stmt, ParseError> {
         let start = self.bump().range.start();
         let name_token = self.expect(TokenKind::Name)?;
+        if !self.options.version.supports(PythonVersion::Py312) {
+            self.push_error(Diagnostic::unsupported(
+                TextRange::new(start, name_token.range.end()),
+                "type statements require Python 3.12 or newer",
+            ));
+        }
         let name = Expr::Name(ExprName {
             range: name_token.range,
             id: normalize_identifier(self.name_text(name_token)),
@@ -730,6 +736,12 @@ impl<'src> Parser<'src> {
         let mut items = Vec::new();
         let parenthesized = self.at(TokenKind::LPar) && self.has_top_level_with_separator();
         if parenthesized {
+            if !self.options.version.supports(PythonVersion::Py310) {
+                self.push_error(Diagnostic::unsupported(
+                    self.current().range,
+                    "parenthesized with statements require Python 3.10 or newer",
+                ));
+            }
             self.bump();
         }
         loop {
@@ -2281,6 +2293,12 @@ impl<'src> Parser<'src> {
             let mut values = Vec::new();
             for part in parts {
                 if part.flags.prefix.is_format() {
+                    self.check_legacy_fstring_constraints(
+                        part.range,
+                        &part.value,
+                        part.flags.quote,
+                        part.flags.triple,
+                    );
                     if let Expr::FString(node) = parse_fstring(
                         self.src,
                         part.range,
@@ -2315,6 +2333,55 @@ impl<'src> Parser<'src> {
             range: TextRange::new(start, end),
             value: StringLiteralValue::new(parts),
         }))
+    }
+
+    fn check_legacy_fstring_constraints(
+        &mut self,
+        range: TextRange,
+        value: &str,
+        quote: char,
+        triple: bool,
+    ) {
+        if self.options.version.supports(PythonVersion::Py312) {
+            return;
+        }
+        let body_start = fstring_body_start(self.src, range, triple);
+        let mut cursor = 0;
+        while cursor < value.len() {
+            let Some(open) = value[cursor..].find('{') else { break };
+            let open = cursor + open;
+            if value.as_bytes().get(open + 1) == Some(&b'{')
+                || (!value.is_empty() && is_unicode_name_brace(value, open))
+            {
+                cursor = open + 1;
+                continue;
+            }
+            let field_start = open + 1;
+            let Some(field_end) = fstring_field_end(value, field_start) else { break };
+            let inner = value.get(field_start..field_end).unwrap_or_default();
+            let (expression, _, _, _) = split_fstring_field(inner);
+            let field_range =
+                TextRange::from_usize(body_start + open, body_start + field_end.saturating_add(1));
+            if expression.contains(quote) {
+                self.push_error(Diagnostic::unsupported(
+                    field_range,
+                    "f-string expressions cannot reuse the outer quote before Python 3.12",
+                ));
+            }
+            if expression.contains('\\') {
+                self.push_error(Diagnostic::unsupported(
+                    field_range,
+                    "f-string expressions cannot contain a backslash before Python 3.12",
+                ));
+            }
+            if has_unquoted_marker(expression, b'#') {
+                self.push_error(Diagnostic::unsupported(
+                    field_range,
+                    "f-string expressions cannot contain a comment before Python 3.12",
+                ));
+            }
+            cursor = field_end.saturating_add(1);
+        }
     }
 
     fn string_part(
@@ -3078,17 +3145,22 @@ fn skip_fstring_string(value: &str, cursor: &mut usize) {
 }
 
 fn has_unquoted_newline(value: &str) -> bool {
+    has_unquoted_marker(value, b'\n') || has_unquoted_marker(value, b'\r')
+}
+
+fn has_unquoted_marker(value: &str, marker: u8) -> bool {
     let bytes = value.as_bytes();
     let mut cursor = 0;
     while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\n' | b'\r' => return true,
-            b'\'' | b'"' => {
-                skip_fstring_string(value, &mut cursor);
-                continue;
-            }
-            b'\\' => cursor += 1,
-            _ => {}
+        if bytes[cursor] == marker {
+            return true;
+        }
+        if matches!(bytes[cursor], b'\'' | b'"') {
+            skip_fstring_string(value, &mut cursor);
+            continue;
+        }
+        if bytes[cursor] == b'\\' {
+            cursor += 1;
         }
         cursor += 1;
     }
