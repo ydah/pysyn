@@ -60,6 +60,26 @@ timeouts, or process crashes. `--report report.json` writes machine-readable
 results suitable for CI artifacts. It does not fetch files or require a
 network connection.
 
+## Syntax diagnostics
+
+`tools/syntax_validation.py` extracts the rejected doctest examples from
+CPython's `test/test_syntax.py` and compares both rejection and the displayed
+line/column. The CI gate requires 100% detection and at least 95% location
+agreement:
+
+```bash
+python3 tools/syntax_validation.py \
+  --python python3.13 \
+  --pysyn target/debug/pysyn \
+  --test-syntax "$(python3.13 -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')/test/test_syntax.py" \
+  --min-detection 1.0 \
+  --min-position 0.95 \
+  --report syntax-validation.json
+```
+
+The report retains each mismatch so diagnostic regressions can be reviewed
+without relying on the aggregate percentage alone.
+
 ## Fuzz smoke test
 
 `tools/fuzz_smoke.py` feeds deterministic malformed UTF-8 text-safe inputs to

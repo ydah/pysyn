@@ -80,6 +80,36 @@ jobs:
           path: differential-${{ matrix.python-version }}.json
           if-no-files-found: ignore
 
+  syntax:
+    name: CPython syntax diagnostics
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - run: cargo build --quiet --all-features --bin pysyn
+      - name: Locate CPython syntax corpus
+        run: echo "PYTHON_STDLIB=$(python -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')" >> "$GITHUB_ENV"
+      - name: Check syntax detection and locations
+        run: |
+          python tools/syntax_validation.py \
+            --python python \
+            --pysyn target/debug/pysyn \
+            --test-syntax "$PYTHON_STDLIB/test/test_syntax.py" \
+            --min-detection 1.0 \
+            --min-position 0.95 \
+            --report syntax-validation.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: syntax-validation
+          path: syntax-validation.json
+          if-no-files-found: ignore
+
   coverage:
     runs-on: ubuntu-latest
     steps:
