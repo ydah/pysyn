@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use pysyn::printer::{dump, unparse, DumpOptions};
 
 const SOURCE: &str = r#"
 from collections import Counter
@@ -25,6 +26,13 @@ fn benchmark_parser(c: &mut Criterion) {
         b.iter(|| {
             let module = pysyn::parse_module(black_box(SOURCE)).expect("benchmark source is valid");
             black_box(module);
+        });
+    });
+    group.bench_function("full", |b| {
+        b.iter(|| {
+            let module = pysyn::parse_module(black_box(SOURCE)).expect("benchmark source is valid");
+            black_box(dump(&module, DumpOptions::default()));
+            black_box(unparse(&module));
         });
     });
     group.finish();

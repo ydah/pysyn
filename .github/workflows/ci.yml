@@ -129,9 +129,9 @@ jobs:
           components: rust-src
       - run: cargo install cargo-fuzz --locked
       - name: Run arbitrary-byte cargo-fuzz target
-        run: cargo fuzz run parse_bytes -- -max_total_time=300
+        run: cargo fuzz run parse_bytes -- -max_total_time=600
       - name: Run structured-input cargo-fuzz target
-        run: cargo fuzz run parse_structured -- -max_total_time=300
+        run: cargo fuzz run parse_structured -- -max_total_time=600
       - run: cargo build --quiet --release --bin pysyn
       - name: Run deterministic Python parser fuzz smoke test
         run: >-

@@ -71,9 +71,10 @@ subprocess smoke test: it checks reproducible malformed inputs for crashes,
 panics, stack overflows, and hangs.
 
 The repository also contains `cargo-fuzz` targets for arbitrary bytes and
-structured parser input. The scheduled job runs each for five minutes before
+structured parser input. The scheduled job runs each for ten minutes before
 running the deterministic Python smoke test. Criterion benchmarks for
-tokenization and parsing are available through `cargo bench --bench parser`;
+tokenization, parsing, and the complete parse/dump/unparse path are available
+through `cargo bench --bench parser`;
 the main-branch job caches Criterion's baseline directory so repeated runs can
 report regressions.
 
