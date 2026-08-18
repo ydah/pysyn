@@ -6,6 +6,7 @@ use pysyn::ast::{Expr, ExprContext, Stmt};
 use pysyn::lexer::{tokenize_with, LexMode, LexOptions};
 use pysyn::parser::{parse, ParseMode, ParseOptions};
 use pysyn::token::{PythonVersion, TokenKind};
+use pysyn::validate::{validate, ValidateLevel};
 
 #[test]
 fn ast_enums_remain_compact() {
@@ -142,6 +143,19 @@ fn builds_match_pattern_variants() {
     assert!(matches!(statement.cases[1].pattern, pysyn::ast::Pattern::Class(_)));
     assert!(matches!(statement.cases[2].pattern, pysyn::ast::Pattern::Sequence(_)));
     assert!(matches!(statement.cases[3].pattern, pysyn::ast::Pattern::Or(_)));
+}
+
+#[test]
+fn validates_nested_statement_contexts() {
+    let module = pysyn::parse_module(
+        "try:\n    return 1\nexcept Exception:\n    break\nnonlocal value\ndef ok():\n    return 1\n",
+    )
+    .expect("valid source for semantic validation");
+    let diagnostics = validate(&module, ValidateLevel::Semantic);
+    assert_eq!(diagnostics.len(), 3);
+    assert!(diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.code == pysyn::DiagnosticCode::Validation));
 }
 
 #[test]
