@@ -1,0 +1,36 @@
+[package]
+name = "pysyn"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "A standalone Rust parser for Python source code"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+[features]
+default = ["std", "nfkc"]
+std = []
+encoding = []
+bigint = []
+serde = []
+miette = []
+intern = []
+nfkc = []
+
+[dependencies]
+unicode-ident = "1.0"
+
+[[bin]]
+name = "pysyn"
+path = "src/bin/pysyn.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+all = "warn"
+
+[profile.release]
+lto = true
+codegen-units = 1

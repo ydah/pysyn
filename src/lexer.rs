@@ -1,0 +1,569 @@
+//! Python's indentation-aware lexical scanner.
+
+use crate::error::{Diagnostic, DiagnosticCode};
+use crate::source::{TextRange, TextSize};
+use crate::token::{PythonVersion, StringPrefix, Token, TokenKind};
+use std::fmt;
+
+/// Selects whether trivia tokens are emitted.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum LexMode {
+    /// Emit comments and non-logical newlines.
+    Full,
+    /// Suppress trivia useful only to a parser.
+    Parse,
+}
+
+/// Lexer configuration.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct LexOptions {
+    /// Trivia mode.
+    pub mode: LexMode,
+    /// Python grammar version.
+    pub version: PythonVersion,
+}
+
+impl Default for LexOptions {
+    fn default() -> Self {
+        Self { mode: LexMode::Parse, version: PythonVersion::default() }
+    }
+}
+
+/// A lexical error with its source range.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LexError {
+    /// Diagnostic payload.
+    pub diagnostic: Diagnostic,
+}
+
+impl fmt::Display for LexError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.diagnostic.fmt(f)
+    }
+}
+
+impl std::error::Error for LexError {}
+
+/// An iterator over Python tokens.
+pub struct Tokenizer<'src> {
+    source: &'src str,
+    items: Vec<Result<Token, LexError>>,
+    cursor: usize,
+}
+
+impl<'src> Iterator for Tokenizer<'src> {
+    type Item = Result<Token, LexError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.items.get(self.cursor)?.clone();
+        self.cursor += 1;
+        Some(item)
+    }
+}
+
+impl<'src> Tokenizer<'src> {
+    /// Returns the original source text.
+    pub const fn source(&self) -> &'src str {
+        self.source
+    }
+}
+
+/// Tokenizes source using full tokenize-compatible trivia mode.
+pub fn tokenize(src: &str) -> Tokenizer<'_> {
+    tokenize_with(src, LexOptions { mode: LexMode::Full, ..LexOptions::default() })
+}
+
+/// Tokenizes source using explicit lexer options.
+pub fn tokenize_with(src: &str, options: LexOptions) -> Tokenizer<'_> {
+    Scanner::new(src, options).finish()
+}
+
+struct Scanner<'src> {
+    src: &'src str,
+    options: LexOptions,
+    position: usize,
+    line_start: bool,
+    paren_depth: u32,
+    indents: Vec<Indentation>,
+    pending_dedents: usize,
+    items: Vec<Result<Token, LexError>>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct Indentation {
+    tab8: u32,
+    tab1: u32,
+}
+
+impl<'src> Scanner<'src> {
+    fn new(src: &str, options: LexOptions) -> Scanner<'_> {
+        Scanner {
+            src,
+            options,
+            position: 0,
+            line_start: true,
+            paren_depth: 0,
+            indents: vec![Indentation { tab8: 0, tab1: 0 }],
+            pending_dedents: 0,
+            items: Vec::new(),
+        }
+    }
+
+    fn finish(mut self) -> Tokenizer<'src> {
+        while self.position < self.src.len() {
+            self.scan_one();
+        }
+        if !self
+            .items
+            .iter()
+            .any(|item| matches!(item, Ok(token) if token.kind == TokenKind::Newline))
+            && !self.src.is_empty()
+        {
+            let range = TextRange::empty(TextSize::new(self.src.len() as u32));
+            self.items.push(Ok(Token::new(TokenKind::Newline, range)));
+        }
+        while self.indents.len() > 1 {
+            self.indents.pop();
+            let range = TextRange::empty(TextSize::new(self.src.len() as u32));
+            self.items.push(Ok(Token::new(TokenKind::Dedent, range)));
+        }
+        let end = TextRange::empty(TextSize::new(self.src.len() as u32));
+        self.items.push(Ok(Token::new(TokenKind::EndMarker, end)));
+        Tokenizer { source: self.src, items: self.items, cursor: 0 }
+    }
+
+    fn scan_one(&mut self) {
+        if self.pending_dedents > 0 {
+            self.pending_dedents -= 1;
+            let offset = TextRange::empty(TextSize::new(self.position as u32));
+            self.items.push(Ok(Token::new(TokenKind::Dedent, offset)));
+            return;
+        }
+        if self.line_start && self.paren_depth == 0 {
+            self.scan_indentation();
+            if self.pending_dedents > 0 {
+                return;
+            }
+            if self.position >= self.src.len() {
+                return;
+            }
+        }
+        let byte = self.src.as_bytes()[self.position];
+        if byte == b' ' || byte == b'\t' || byte == b'\x0c' {
+            self.position += 1;
+            return;
+        }
+        if byte == b'\r' || byte == b'\n' {
+            self.scan_newline();
+            return;
+        }
+        if byte == b'#' {
+            self.scan_comment();
+            return;
+        }
+        if byte == b'\\' {
+            if self.consume_line_continuation() {
+                return;
+            }
+            self.error(
+                self.position,
+                self.position + 1,
+                "unexpected character after line continuation character",
+            );
+            self.position += 1;
+            return;
+        }
+        if let Some((kind, end)) = self.scan_prefixed_string() {
+            self.emit(kind, self.position, end);
+            self.position = end;
+            return;
+        }
+        if is_identifier_start(self.src[self.position..].chars().next().unwrap_or('\0')) {
+            self.scan_name();
+            return;
+        }
+        if byte.is_ascii_digit()
+            || (byte == b'.'
+                && matches!(self.src.as_bytes().get(self.position + 1), Some(byte) if byte.is_ascii_digit()))
+        {
+            self.scan_number();
+            return;
+        }
+        if let Some((kind, width)) = operator_at(&self.src[self.position..]) {
+            let start = self.position;
+            self.position += width;
+            if matches!(kind, TokenKind::LPar | TokenKind::LSqb | TokenKind::LBrace) {
+                self.paren_depth += 1;
+            }
+            if matches!(kind, TokenKind::RPar | TokenKind::RSqb | TokenKind::RBrace) {
+                self.paren_depth = self.paren_depth.saturating_sub(1);
+            }
+            self.emit(kind, start, self.position);
+            return;
+        }
+        self.error(
+            self.position,
+            self.position + self.src[self.position..].chars().next().unwrap_or('\0').len_utf8(),
+            "invalid character in source",
+        );
+        let end =
+            self.position + self.src[self.position..].chars().next().unwrap_or('\0').len_utf8();
+        self.emit(TokenKind::Unknown, self.position, end);
+        self.position = end;
+    }
+
+    fn scan_indentation(&mut self) {
+        let start = self.position;
+        let mut tab8 = 0;
+        let mut tab1 = 0;
+        while let Some(byte) = self.src.as_bytes().get(self.position) {
+            match byte {
+                b' ' => {
+                    tab8 += 1;
+                    tab1 += 1;
+                    self.position += 1;
+                }
+                b'\t' => {
+                    tab8 = (tab8 / 8 + 1) * 8;
+                    tab1 += 1;
+                    self.position += 1;
+                }
+                b'\x0c' => {
+                    tab8 = 0;
+                    tab1 = 0;
+                    self.position += 1;
+                }
+                _ => break,
+            }
+        }
+        let next = self.src.as_bytes().get(self.position).copied();
+        if matches!(next, None | Some(b'\n') | Some(b'\r') | Some(b'#')) {
+            self.line_start = false;
+            return;
+        }
+        let current = self.indents.last().copied().unwrap_or(Indentation { tab8: 0, tab1: 0 });
+        let indentation = Indentation { tab8, tab1 };
+        if (tab8.cmp(&current.tab8) == std::cmp::Ordering::Less)
+            != (tab1.cmp(&current.tab1) == std::cmp::Ordering::Less)
+        {
+            self.error(start, self.position, "inconsistent use of tabs and spaces in indentation");
+        }
+        if tab8 > current.tab8 {
+            self.indents.push(indentation);
+            self.emit(TokenKind::Indent, start, self.position);
+        } else if tab8 < current.tab8 {
+            while self.indents.len() > 1
+                && matches!(self.indents.last(), Some(level) if level.tab8 > tab8)
+            {
+                self.indents.pop();
+                self.pending_dedents += 1;
+            }
+            if self.indents.last().map_or(true, |level| level.tab8 != tab8) {
+                self.error(
+                    start,
+                    self.position,
+                    "unindent does not match any outer indentation level",
+                );
+            }
+        }
+        self.line_start = false;
+    }
+
+    fn scan_newline(&mut self) {
+        let start = self.position;
+        if self.src.as_bytes()[self.position] == b'\r' {
+            self.position += 1;
+            if self.src.as_bytes().get(self.position) == Some(&b'\n') {
+                self.position += 1;
+            }
+        } else {
+            self.position += 1;
+        }
+        self.line_start = true;
+        let kind =
+            if self.paren_depth > 0 { TokenKind::NonLogicalNewline } else { TokenKind::Newline };
+        if self.options.mode == LexMode::Full || kind == TokenKind::Newline {
+            self.emit(kind, start, self.position);
+        }
+    }
+
+    fn scan_comment(&mut self) {
+        let start = self.position;
+        while self.position < self.src.len()
+            && !matches!(self.src.as_bytes()[self.position], b'\r' | b'\n')
+        {
+            self.position += 1;
+        }
+        if self.options.mode == LexMode::Full {
+            self.emit(TokenKind::Comment, start, self.position);
+        }
+    }
+
+    fn consume_line_continuation(&mut self) -> bool {
+        let next = self.src.as_bytes().get(self.position + 1).copied();
+        if next != Some(b'\n') && next != Some(b'\r') {
+            return false;
+        }
+        self.position += 2;
+        if next == Some(b'\r') && self.src.as_bytes().get(self.position) == Some(&b'\n') {
+            self.position += 1;
+        }
+        self.line_start = true;
+        true
+    }
+
+    fn scan_name(&mut self) {
+        let start = self.position;
+        self.position += self.src[self.position..].chars().next().unwrap().len_utf8();
+        while self.position < self.src.len() {
+            let character = self.src[self.position..].chars().next().unwrap();
+            if !is_identifier_continue(character) {
+                break;
+            }
+            self.position += character.len_utf8();
+        }
+        let text = &self.src[start..self.position];
+        self.emit(TokenKind::keyword(text), start, self.position);
+    }
+
+    fn scan_number(&mut self) {
+        let start = self.position;
+        let bytes = self.src.as_bytes();
+        let base = if bytes.get(self.position) == Some(&b'0') {
+            match bytes.get(self.position + 1) {
+                Some(b'x' | b'X') => {
+                    self.position += 2;
+                    Some(16)
+                }
+                Some(b'o' | b'O') => {
+                    self.position += 2;
+                    Some(8)
+                }
+                Some(b'b' | b'B') => {
+                    self.position += 2;
+                    Some(2)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(base) = base {
+            while self.position < bytes.len()
+                && (bytes[self.position].is_ascii_hexdigit() || bytes[self.position] == b'_')
+            {
+                self.position += 1;
+            }
+            let digits = &self.src[start + 2..self.position];
+            let valid = match base {
+                2 => digits.chars().all(|c| c == '_' || matches!(c, '0' | '1')),
+                8 => digits.chars().all(|c| c == '_' || ('0'..='7').contains(&c)),
+                _ => true,
+            };
+            if !valid {
+                self.error(start, self.position, "invalid digit in numeric literal");
+            }
+        } else {
+            while self.position < bytes.len()
+                && (bytes[self.position].is_ascii_digit() || bytes[self.position] == b'_')
+            {
+                self.position += 1;
+            }
+            if bytes.get(self.position) == Some(&b'.') {
+                self.position += 1;
+                while self.position < bytes.len()
+                    && (bytes[self.position].is_ascii_digit() || bytes[self.position] == b'_')
+                {
+                    self.position += 1;
+                }
+            }
+            if matches!(bytes.get(self.position), Some(b'e' | b'E')) {
+                self.position += 1;
+                if matches!(bytes.get(self.position), Some(b'+' | b'-')) {
+                    self.position += 1;
+                }
+                while self.position < bytes.len()
+                    && (bytes[self.position].is_ascii_digit() || bytes[self.position] == b'_')
+                {
+                    self.position += 1;
+                }
+            }
+            if matches!(bytes.get(self.position), Some(b'j' | b'J')) {
+                self.position += 1;
+            }
+        }
+        let text = &self.src[start..self.position];
+        let lower = text.to_ascii_lowercase();
+        let kind = if lower.ends_with('j') {
+            TokenKind::Complex
+        } else if lower.contains('.') || lower.contains('e') {
+            TokenKind::Float
+        } else {
+            TokenKind::Int
+        };
+        if text.ends_with('_') || text.contains("__") {
+            self.error(start, self.position, "invalid decimal literal");
+        }
+        if kind == TokenKind::Int
+            && text.len() > 1
+            && text.starts_with('0')
+            && text.chars().any(|c| ('1'..='9').contains(&c))
+            && !text.starts_with("0x")
+            && !text.starts_with("0X")
+            && !text.starts_with("0o")
+            && !text.starts_with("0O")
+            && !text.starts_with("0b")
+            && !text.starts_with("0B")
+        {
+            self.error(
+                start,
+                self.position,
+                "leading zeros in decimal integer literals are not permitted",
+            );
+        }
+        if matches!(self.src.as_bytes().get(self.position), Some(byte) if byte.is_ascii_alphabetic() || *byte == b'_')
+        {
+            self.error(start, self.position + 1, "invalid decimal literal");
+        }
+        self.emit(kind, start, self.position);
+    }
+
+    fn scan_prefixed_string(&mut self) -> Option<(TokenKind, usize)> {
+        let start = self.position;
+        let mut cursor = start;
+        while cursor < self.src.len()
+            && cursor - start < 2
+            && self.src.as_bytes()[cursor].is_ascii_alphabetic()
+        {
+            cursor += 1;
+        }
+        let prefix = &self.src[start..cursor];
+        let quote = self.src.as_bytes().get(cursor).copied()?;
+        if quote != b'\'' && quote != b'"' {
+            return None;
+        }
+        let flags = StringPrefix::parse(prefix)?;
+        let end = self.scan_string_body(cursor, flags.is_raw());
+        let triple = self.src.as_bytes().get(cursor..cursor + 3)
+            == Some(if quote == b'\'' { b"'''" } else { b"\"\"\"" });
+        Some((TokenKind::String { prefix: flags, triple }, end))
+    }
+
+    fn scan_string_body(&mut self, quote_start: usize, raw: bool) -> usize {
+        let quote = self.src.as_bytes()[quote_start];
+        let triple = self.src.as_bytes().get(quote_start..quote_start + 3)
+            == Some(if quote == b'\'' { b"'''" } else { b"\"\"\"" });
+        let delimiter = if triple { 3 } else { 1 };
+        let mut cursor = quote_start + delimiter;
+        while cursor < self.src.len() {
+            if self.src.as_bytes().get(cursor..cursor + delimiter)
+                == Some(if quote == b'\'' {
+                    if triple {
+                        b"'''"
+                    } else {
+                        b"'"
+                    }
+                } else {
+                    if triple {
+                        b"\"\"\""
+                    } else {
+                        b"\""
+                    }
+                })
+            {
+                return cursor + delimiter;
+            }
+            if !raw && self.src.as_bytes()[cursor] == b'\\' {
+                cursor += 2;
+            } else {
+                cursor += self.src[cursor..].chars().next().unwrap().len_utf8();
+            }
+        }
+        self.error(
+            quote_start,
+            self.src.len(),
+            if triple {
+                "unterminated triple-quoted string literal"
+            } else {
+                "unterminated string literal"
+            },
+        );
+        self.src.len()
+    }
+
+    fn emit(&mut self, kind: TokenKind, start: usize, end: usize) {
+        self.items.push(Ok(Token::new(kind, TextRange::from_usize(start, end))));
+    }
+
+    fn error(&mut self, start: usize, end: usize, message: &str) {
+        self.items.push(Err(LexError {
+            diagnostic: Diagnostic::error(
+                DiagnosticCode::Lexical,
+                TextRange::from_usize(start, end),
+                message,
+            ),
+        }));
+    }
+}
+
+fn is_identifier_start(character: char) -> bool {
+    character == '_' || unicode_ident::is_xid_start(character)
+}
+fn is_identifier_continue(character: char) -> bool {
+    character == '_' || unicode_ident::is_xid_continue(character)
+}
+
+fn operator_at(source: &str) -> Option<(TokenKind, usize)> {
+    const OPERATORS: &[(&str, TokenKind)] = &[
+        ("**=", TokenKind::DoubleStarEqual),
+        ("//=", TokenKind::DoubleSlashEqual),
+        (">>=", TokenKind::RightShiftEqual),
+        ("<<=", TokenKind::LeftShiftEqual),
+        ("+=", TokenKind::PlusEqual),
+        ("-=", TokenKind::MinusEqual),
+        ("*=", TokenKind::StarEqual),
+        ("/=", TokenKind::SlashEqual),
+        ("%=", TokenKind::PercentEqual),
+        ("@=", TokenKind::AtEqual),
+        ("&=", TokenKind::AmperEqual),
+        ("|=", TokenKind::VbarEqual),
+        ("^=", TokenKind::CircumflexEqual),
+        ("**", TokenKind::DoubleStar),
+        ("//", TokenKind::DoubleSlash),
+        ("<<", TokenKind::LeftShift),
+        (">>", TokenKind::RightShift),
+        ("->", TokenKind::Arrow),
+        (":=", TokenKind::ColonEqual),
+        ("==", TokenKind::EqEqual),
+        ("!=", TokenKind::NotEqual),
+        ("<=", TokenKind::LessEqual),
+        (">=", TokenKind::GreaterEqual),
+        ("...", TokenKind::Ellipsis),
+        ("+", TokenKind::Plus),
+        ("-", TokenKind::Minus),
+        ("*", TokenKind::Star),
+        ("/", TokenKind::Slash),
+        ("%", TokenKind::Percent),
+        ("@", TokenKind::At),
+        ("&", TokenKind::Ampersand),
+        ("|", TokenKind::Vbar),
+        ("^", TokenKind::CircumFlex),
+        ("~", TokenKind::Tilde),
+        ("<", TokenKind::Less),
+        (">", TokenKind::Greater),
+        ("=", TokenKind::Equal),
+        ("!", TokenKind::Exclamation),
+        ("(", TokenKind::LPar),
+        (")", TokenKind::RPar),
+        ("[", TokenKind::LSqb),
+        ("]", TokenKind::RSqb),
+        ("{", TokenKind::LBrace),
+        ("}", TokenKind::RBrace),
+        (",", TokenKind::Comma),
+        (":", TokenKind::Colon),
+        (".", TokenKind::Dot),
+        (";", TokenKind::Semi),
+    ];
+    OPERATORS
+        .iter()
+        .find_map(|(text, kind)| source.starts_with(text).then_some((*kind, text.len())))
+}

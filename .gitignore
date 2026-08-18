@@ -1,0 +1,9 @@
+/target/
+/corpus/
+/vendor/
+/fixtures/
+/fuzz/artifacts/
+/fuzz/corpus/
+*.swp
+.DS_Store
+
