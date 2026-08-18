@@ -61,15 +61,18 @@ jobs:
         with:
           toolchain: stable
       - run: cargo build --quiet --all-features --bin pysyn
+      - name: Locate CPython standard library corpus
+        run: echo "PYTHON_STDLIB=$(python -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')" >> "$GITHUB_ENV"
       - name: Run token, AST, and round-trip comparisons with f-strings
-        run: >-
-          python tools/differential.py
-          --python python
-          --pysyn target/debug/pysyn
-          --mode all
-          --include-fstrings
-          --strict-ast
-          --report differential-${{ matrix.python-version }}.json
+        run: |
+          python tools/differential.py \
+            --python python \
+            --pysyn target/debug/pysyn \
+            --mode all \
+            --include-fstrings \
+            --strict-ast \
+            --report differential-${{ matrix.python-version }}.json \
+          "$PYTHON_STDLIB"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -81,6 +84,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
@@ -88,9 +94,10 @@ jobs:
         with:
           tool: cargo-llvm-cov
       - name: Collect coverage report and enforce regression floor
-        run: >-
-          cargo llvm-cov --all-features --workspace
-          --fail-under-lines 40
+        run: |
+          PYSYN_COVERAGE_STDLIB="$(python -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')" \
+          cargo llvm-cov --all-features --workspace \
+          --fail-under-lines 85 \
           --lcov --output-path lcov.info
       - uses: actions/upload-artifact@v4
         with:

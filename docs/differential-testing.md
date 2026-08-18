@@ -38,13 +38,22 @@ prevents f-string token or AST-location coverage from being silently skipped.
 Compare a local corpus without copying it into the repository:
 
 ```bash
+PYTHON=python3.12
+PYTHON_STDLIB="$($PYTHON -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')"
 python3 tools/differential.py \
-  --python python3.12 \
+  --python "$PYTHON" \
   --pysyn target/debug/pysyn \
-  --mode ast \
-  --limit 100 \
-  corpus/stdlib
+  --mode all \
+  --include-fstrings \
+  --strict-ast \
+  "$PYTHON_STDLIB"
 ```
+
+The CI matrix uses the standard-library directory belonging to each matrix
+interpreter, so the Python 3.10–3.13 jobs exercise the complete local `Lib/`
+tree rather than only the built-in smoke cases. Test-data files that cannot be
+decoded or that CPython intentionally rejects are reported as reference cases
+by the harness.
 
 The command exits non-zero for mismatches, parser errors, malformed output,
 timeouts, or process crashes. `--report report.json` writes machine-readable
@@ -72,28 +81,40 @@ panics, stack overflows, and hangs.
 
 The repository also contains `cargo-fuzz` targets for arbitrary bytes and
 structured parser input. The scheduled job runs each for ten minutes before
-running the deterministic Python smoke test. Criterion benchmarks for
-tokenization, parsing, and the complete parse/dump/unparse path are available
-through `cargo bench --bench parser`;
+running the deterministic Python smoke test. The release gate requires a
+separate 24-hour run for each target:
+
+```bash
+cargo +nightly fuzz run parse_bytes -- -max_total_time=86400
+cargo +nightly fuzz run parse_structured -- -max_total_time=86400
+```
+
+Criterion benchmarks for tokenization, parsing, and the complete
+parse/dump/unparse path are available through `cargo bench --bench parser`;
 the main-branch job caches Criterion's baseline directory so repeated runs can
 report regressions.
 
 ## Coverage
 
-The CI `coverage` job installs `cargo-llvm-cov`, runs the complete workspace
-test suite, uploads `lcov.info`, and enforces a 40% line-coverage floor with
-`--fail-under-lines 40`. The current test suite measures about 45.6% line coverage
-locally, so this is a conservative non-regression floor rather than a claim of
-the design-document's 85% target. The 85% target remains unmet and should be
-raised only after the missing parser, printer, validator, and CLI paths receive
-tests.
+The CI `coverage` job installs Python 3.13, points
+`PYSYN_COVERAGE_STDLIB` at that interpreter's standard library, and runs the
+complete workspace test suite with `cargo-llvm-cov`. The corpus-driven test
+exercises parser, printer, validator, visitor, source, and CLI paths, and CI
+enforces the design-document's 85% line-coverage target with
+`--fail-under-lines 85` while uploading `lcov.info`.
+
+Run the same coverage gate locally with:
+
+```bash
+PYSYN_COVERAGE_STDLIB="$(python3.13 -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')" \
+cargo llvm-cov --all-features --workspace --fail-under-lines 85
+```
 
 ## CI matrix
 
-The `differential` job runs the smoke corpus once for each CPython 3.10–3.13
-interpreter using an all-features binary, f-string token coverage, and strict
-AST location checking, then
-uploads the JSON report even when a comparison fails. The scheduled `fuzz` job
-is independent of the differential matrix and is the deterministic Python
-smoke test described above. Large CPython or third-party corpora remain opt-in
-local inputs; they are not downloaded by CI.
+The `differential` job runs the complete standard-library corpus once for each
+CPython 3.10–3.13 interpreter using an all-features binary, f-string token
+coverage, and strict AST location checking, then uploads the JSON report even
+when a comparison fails. The scheduled `fuzz` job is independent of the
+differential matrix and is the deterministic Python smoke test described above.
+Third-party corpora remain opt-in local inputs; CI does not download them.
