@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: '17 3 * * *'
 
 jobs:
   fmt:
@@ -42,3 +44,72 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - run: RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps
+
+  differential:
+    name: differential / Python ${{ matrix.python-version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13']
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - run: cargo build --quiet --bin pysyn
+      - name: Run token, AST, and round-trip comparisons
+        run: >-
+          python tools/differential.py
+          --python python
+          --pysyn target/debug/pysyn
+          --mode all
+          --report differential-${{ matrix.python-version }}.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: differential-${{ matrix.python-version }}
+          path: differential-${{ matrix.python-version }}.json
+          if-no-files-found: ignore
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Collect coverage report
+        run: >-
+          cargo llvm-cov --all-features --workspace
+          --lcov --output-path lcov.info
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: lcov.info
+
+  fuzz:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - run: cargo build --quiet --release --bin pysyn
+      - name: Run deterministic parser fuzz smoke test
+        run: >-
+          python tools/fuzz_smoke.py
+          --pysyn target/release/pysyn
+          --cases 2000
+          --seed 313
+          --timeout 1
