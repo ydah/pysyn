@@ -80,3 +80,66 @@ fn parses_comprehensions_and_parameter_sections() {
     let Stmt::Return(return_stmt) = &function.body[0] else { panic!("expected return") };
     assert!(matches!(&**return_stmt.value.as_ref().expect("return value"), Expr::ListComp(_)));
 }
+
+#[test]
+fn parses_multiline_and_delimited_constructs() {
+    let source = concat!(
+        "from package import (first as one, second,)\n",
+        "class Config(**options):\n    pass\n",
+        "def collect(*args: tuple[str, ...], **kwargs: dict[str, int]):\n",
+        "    return args[0], kwargs\n",
+        "for item, in values:\n    item += value,\n",
+        "with (resource() as handle, other() as backup):\n    pass\n",
+    );
+    let module = pysyn::parse_module(source).expect("valid delimited source");
+    assert!(matches!(module.body[0], Stmt::ImportFrom(_)));
+    assert!(matches!(module.body[1], Stmt::ClassDef(_)));
+    assert!(matches!(module.body[2], Stmt::FunctionDef(_)));
+    assert!(matches!(module.body[3], Stmt::For(_)));
+    assert!(matches!(module.body[4], Stmt::With(_)));
+}
+
+#[test]
+fn handles_raw_strings_and_backslash_continuations() {
+    let source =
+        concat!("value = r'[\\w!\"\\'&.,?]' \\\n", "other = first + \\\n", "    second\n",);
+    assert!(pysyn::parse_module(source).is_ok());
+}
+
+#[test]
+fn detects_python_source_encoding_markers() {
+    assert_eq!(
+        pysyn::detect_encoding(b"# coding: cp932\n"),
+        Ok(pysyn::SourceEncoding::Declared("cp932".into()))
+    );
+    assert_eq!(
+        pysyn::detect_encoding(b"\xef\xbb\xbf# coding: utf-8\n"),
+        Ok(pysyn::SourceEncoding::Utf8Bom)
+    );
+    assert!(pysyn::detect_encoding(b"\xef\xbb\xbf# coding: latin-1\n").is_err());
+}
+
+#[test]
+fn keeps_tokens_when_requested_and_formats_python_values() {
+    let parsed =
+        parse("value = 1e-5\n", ParseOptions { keep_tokens: true, ..ParseOptions::default() });
+    assert!(!parsed.tokens.is_empty());
+    assert_eq!(pysyn::printer::pyrepr_float(1e-5), "1e-05");
+    assert_eq!(pysyn::printer::pyrepr("it's"), "\"it's\"");
+}
+
+#[cfg(feature = "nfkc")]
+#[test]
+fn normalizes_unicode_identifiers_for_ast_storage() {
+    let module = pysyn::parse_module("ﬁ = 1\n").expect("valid identifier");
+    let Stmt::Assign(assign) = &module.body[0] else { panic!("expected assignment") };
+    assert!(matches!(&assign.targets[0], Expr::Name(node) if node.id.as_ref() == "fi"));
+}
+
+#[cfg(not(feature = "nfkc"))]
+#[test]
+fn preserves_unicode_identifiers_without_nfkc_feature() {
+    let module = pysyn::parse_module("ﬁ = 1\n").expect("valid identifier");
+    let Stmt::Assign(assign) = &module.body[0] else { panic!("expected assignment") };
+    assert!(matches!(&assign.targets[0], Expr::Name(node) if node.id.as_ref() == "ﬁ"));
+}

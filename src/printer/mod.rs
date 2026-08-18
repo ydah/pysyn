@@ -35,6 +35,47 @@ pub fn pyrepr(value: &str) -> String {
     repr_string(value)
 }
 
+/// Formats a floating-point value using Python's common repr thresholds.
+pub fn pyrepr_float(value: f64) -> String {
+    if value.is_nan() {
+        return "nan".into();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_negative() { "-inf".into() } else { "inf".into() };
+    }
+    let raw = value.to_string();
+    let absolute = value.abs();
+    let mut result = if raw.contains('e') || raw.contains('E') {
+        normalize_exponent(&raw)
+    } else if absolute != 0.0 && !(1e-4..1e16).contains(&absolute) {
+        scientific_from_fixed(&raw)
+    } else {
+        raw
+    };
+    if !result.contains('.') && !result.contains('e') && !result.contains('E') {
+        result.push_str(".0");
+    }
+    result
+}
+
+/// Formats a byte string with Python-style `b'...'` escaping.
+pub fn pyrepr_bytes(value: &[u8]) -> String {
+    let mut output = String::from("b'");
+    for byte in value {
+        match byte {
+            b'\\' => output.push_str("\\\\"),
+            b'\'' => output.push_str("\\'"),
+            b'\n' => output.push_str("\\n"),
+            b'\r' => output.push_str("\\r"),
+            b'\t' => output.push_str("\\t"),
+            0x20..=0x7e => output.push(*byte as char),
+            other => output.push_str(&format!("\\x{other:02x}")),
+        }
+    }
+    output.push('\'');
+    output
+}
+
 fn dump_module(module: &ModModule, options: &DumpOptions, level: usize, output: &mut String) {
     output.push_str("Module(body=[");
     for (index, statement) in module.body.iter().enumerate() {
@@ -872,24 +913,58 @@ fn context_name(context: ExprContext) -> &'static str {
 fn number_repr(number: &Number) -> String {
     match number {
         Number::Int(value) => value.to_string(),
-        Number::Float(value) => value.to_string(),
-        Number::Complex { real, imag } => format!("({real}+{imag}j)"),
+        Number::Float(value) => pyrepr_float(*value),
+        Number::Complex { real, imag } => {
+            format!("({}+{}j)", pyrepr_float(*real), pyrepr_float(*imag))
+        }
     }
 }
 fn repr_string(value: &str) -> String {
-    let mut output = String::from("'");
+    let quote = if value.contains('\'') && !value.contains('"') { '"' } else { '\'' };
+    let mut output = String::new();
+    output.push(quote);
     for character in value.chars() {
         match character {
             '\\' => output.push_str("\\\\"),
-            '\'' => output.push_str("\\'"),
+            character if character == quote => {
+                output.push('\\');
+                output.push(character);
+            }
             '\n' => output.push_str("\\n"),
             '\r' => output.push_str("\\r"),
             '\t' => output.push_str("\\t"),
             other => output.push(other),
         }
     }
-    output.push('\'');
+    output.push(quote);
     output
+}
+
+fn normalize_exponent(value: &str) -> String {
+    let Some((mantissa, exponent)) = value.split_once(['e', 'E']) else {
+        return value.to_owned();
+    };
+    let exponent = exponent.parse::<i32>().unwrap_or(0);
+    let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+    format!("{mantissa}e{exponent:+03}")
+}
+
+fn scientific_from_fixed(value: &str) -> String {
+    let negative = value.starts_with('-');
+    let digits = value.trim_start_matches('-');
+    let decimal_position = digits.find('.').unwrap_or(digits.len());
+    let digits = digits.replace('.', "");
+    let Some(first) = digits.find(|character: char| character != '0') else {
+        return if negative { "-0.0".into() } else { "0.0".into() };
+    };
+    let exponent = decimal_position as i32 - first as i32 - 1;
+    let rest = digits[first + 1..].trim_end_matches('0');
+    let mantissa = if rest.is_empty() {
+        digits[first..first + 1].to_owned()
+    } else {
+        format!("{}.{}", &digits[first..first + 1], rest)
+    };
+    format!("{}{}e{exponent:+03}", if negative { "-" } else { "" }, mantissa)
 }
 
 struct Unparser {

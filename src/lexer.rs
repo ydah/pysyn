@@ -82,6 +82,7 @@ struct Scanner<'src> {
     options: LexOptions,
     position: usize,
     line_start: bool,
+    trivia_line: bool,
     paren_depth: u32,
     indents: Vec<Indentation>,
     pending_dedents: usize,
@@ -101,6 +102,7 @@ impl<'src> Scanner<'src> {
             options,
             position: 0,
             line_start: true,
+            trivia_line: false,
             paren_depth: 0,
             indents: vec![Indentation { tab8: 0, tab1: 0 }],
             pending_dedents: 0,
@@ -146,6 +148,10 @@ impl<'src> Scanner<'src> {
             if self.position >= self.src.len() {
                 return;
             }
+        } else if self.line_start {
+            // Indentation is insignificant inside delimiters, but this still
+            // marks the first token on a continued physical line as content.
+            self.line_start = false;
         }
         let byte = self.src.as_bytes()[self.position];
         if byte == b' ' || byte == b'\t' || byte == b'\x0c' {
@@ -245,9 +251,11 @@ impl<'src> Scanner<'src> {
         }
         let next = self.src.as_bytes().get(self.position).copied();
         if matches!(next, None | Some(b'\n') | Some(b'\r') | Some(b'#')) {
+            self.trivia_line = true;
             self.line_start = false;
             return;
         }
+        self.trivia_line = false;
         let current = self.indents.last().copied().unwrap_or(Indentation { tab8: 0, tab1: 0 });
         let indentation = Indentation { tab8, tab1 };
         if (tab8.cmp(&current.tab8) == std::cmp::Ordering::Less)
@@ -287,8 +295,12 @@ impl<'src> Scanner<'src> {
             self.position += 1;
         }
         self.line_start = true;
-        let kind =
-            if self.paren_depth > 0 { TokenKind::NonLogicalNewline } else { TokenKind::Newline };
+        let kind = if self.paren_depth > 0 || self.trivia_line {
+            TokenKind::NonLogicalNewline
+        } else {
+            TokenKind::Newline
+        };
+        self.trivia_line = false;
         if self.options.mode == LexMode::Full || kind == TokenKind::Newline {
             self.emit(kind, start, self.position);
         }
@@ -315,7 +327,9 @@ impl<'src> Scanner<'src> {
         if next == Some(b'\r') && self.src.as_bytes().get(self.position) == Some(&b'\n') {
             self.position += 1;
         }
-        self.line_start = true;
+        // A backslash continuation keeps the logical line (and its current
+        // indentation) active across the physical newline.
+        self.line_start = false;
         true
     }
 
@@ -456,7 +470,7 @@ impl<'src> Scanner<'src> {
         Some((TokenKind::String { prefix: flags, triple }, end))
     }
 
-    fn scan_string_body(&mut self, quote_start: usize, raw: bool) -> usize {
+    fn scan_string_body(&mut self, quote_start: usize, _raw: bool) -> usize {
         let quote = self.src.as_bytes()[quote_start];
         let triple = self.src.as_bytes().get(quote_start..quote_start + 3)
             == Some(if quote == b'\'' { b"'''" } else { b"\"\"\"" });
@@ -480,8 +494,11 @@ impl<'src> Scanner<'src> {
             {
                 return cursor + delimiter;
             }
-            if !raw && self.src.as_bytes()[cursor] == b'\\' {
-                cursor += 2;
+            if self.src.as_bytes()[cursor] == b'\\' {
+                cursor += 1;
+                if cursor < self.src.len() {
+                    cursor += self.src[cursor..].chars().next().unwrap().len_utf8();
+                }
             } else {
                 cursor += self.src[cursor..].chars().next().unwrap().len_utf8();
             }

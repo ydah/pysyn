@@ -26,3 +26,11 @@ cargo clippy --all-targets --all-features -- -D warnings
 The current release is an early implementation. Unsupported or intentionally
 different behavior is tracked in `docs/known-differences.md`.
 
+The command-line tool accepts a file path or standard input:
+
+```text
+cargo run -- tokenize --format=cpython example.py
+cargo run -- dump example.py
+cargo run -- unparse example.py
+cargo run -- check example.py
+```

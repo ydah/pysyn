@@ -254,6 +254,65 @@ impl SourceFile {
     pub const fn line_index(&self) -> &LineIndex {
         &self.index
     }
+
+    /// Decodes UTF-8 source bytes, honoring an optional UTF-8 BOM.
+    pub fn from_bytes(name: impl Into<String>, bytes: &[u8]) -> Result<Self, SourceError> {
+        let encoding = detect_encoding(bytes)?;
+        let payload = if matches!(encoding, SourceEncoding::Utf8Bom) { &bytes[3..] } else { bytes };
+        let text = std::str::from_utf8(payload).map_err(|_| SourceError::InvalidUtf8)?.to_owned();
+        Self::new(name, text)
+    }
+}
+
+/// Encoding marker detected at a Python source boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourceEncoding {
+    /// Plain UTF-8.
+    Utf8,
+    /// UTF-8 preceded by a BOM.
+    Utf8Bom,
+    /// A declared non-UTF-8 codec name.
+    Declared(Box<str>),
+}
+
+/// Detects a UTF-8 BOM or PEP 263 cookie in the first two lines.
+pub fn detect_encoding(bytes: &[u8]) -> Result<SourceEncoding, SourceError> {
+    let has_bom = bytes.starts_with(&[0xef, 0xbb, 0xbf]);
+    let scan = if has_bom { &bytes[3..] } else { bytes };
+    for line in scan.split(|byte| *byte == b'\n' || *byte == b'\r').take(2) {
+        if let Some(position) =
+            line.windows(6).position(|window| window.eq_ignore_ascii_case(b"coding"))
+        {
+            let tail = &line[position + 6..];
+            let tail = tail.strip_prefix(b":").or_else(|| tail.strip_prefix(b"="));
+            if let Some(tail) = tail {
+                let name = tail
+                    .iter()
+                    .skip_while(|byte| byte.is_ascii_whitespace())
+                    .take_while(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                    })
+                    .copied()
+                    .collect::<Vec<_>>();
+                if !name.is_empty() {
+                    let name = String::from_utf8_lossy(&name).to_ascii_lowercase();
+                    if has_bom && name != "utf-8" && name != "utf8" {
+                        return Err(SourceError::EncodingProblem);
+                    }
+                    return Ok(if name == "utf-8" || name == "utf8" {
+                        if has_bom {
+                            SourceEncoding::Utf8Bom
+                        } else {
+                            SourceEncoding::Utf8
+                        }
+                    } else {
+                        SourceEncoding::Declared(name.into())
+                    });
+                }
+            }
+        }
+    }
+    Ok(if has_bom { SourceEncoding::Utf8Bom } else { SourceEncoding::Utf8 })
 }
 
 /// Errors raised while constructing a source file.
@@ -264,12 +323,20 @@ pub enum SourceError {
         /// Source length in bytes.
         size: usize,
     },
+    /// The bytes are not valid UTF-8.
+    InvalidUtf8,
+    /// A BOM conflicts with a declared encoding.
+    EncodingProblem,
 }
 
 impl fmt::Display for SourceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::FileTooLarge { size } => write!(f, "source file is too large: {size} bytes"),
+            Self::InvalidUtf8 => f.write_str("source is not valid UTF-8"),
+            Self::EncodingProblem => {
+                f.write_str("source encoding declaration conflicts with UTF-8 BOM")
+            }
         }
     }
 }

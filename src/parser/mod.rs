@@ -26,6 +26,7 @@ pub struct ParseOptions {
     pub type_comments: bool,
     pub max_depth: u32,
     pub max_errors: usize,
+    pub keep_tokens: bool,
 }
 
 impl Default for ParseOptions {
@@ -38,6 +39,7 @@ impl Default for ParseOptions {
             type_comments: false,
             max_depth: 200,
             max_errors: 100,
+            keep_tokens: false,
         }
     }
 }
@@ -54,6 +56,7 @@ pub enum ParseMode {
 pub struct Parsed {
     pub module: ModModule,
     pub comments: Vec<Comment>,
+    pub tokens: Vec<Token>,
     pub errors: Vec<Diagnostic>,
 }
 
@@ -85,15 +88,31 @@ pub fn parse_expression(src: &str) -> Result<Expr, ParseError> {
 /// Parses source with the requested recovery and version options.
 pub fn parse(src: &str, options: ParseOptions) -> Parsed {
     let mut parser = Parser::new(src, options);
-    let module = match parser.parse_module_inner() {
-        Ok(module) => module,
-        Err(error) => {
-            parser.push_error(error.diagnostic);
-            ModModule { body: Vec::new(), range: TextRange::from_usize(0, src.len()) }
-        }
+    let module = match parser.options.mode {
+        SourceMode::Expression => match parser.expression(0) {
+            Ok(expression) => ModModule {
+                body: vec![Stmt::Expr(StmtExpr {
+                    range: expression.range(),
+                    value: Box::new(expression),
+                })],
+                range: TextRange::from_usize(0, src.len()),
+            },
+            Err(error) => {
+                parser.push_error(error.diagnostic);
+                ModModule { body: Vec::new(), range: TextRange::from_usize(0, src.len()) }
+            }
+        },
+        SourceMode::Module | SourceMode::Interactive => match parser.parse_module_inner() {
+            Ok(module) => module,
+            Err(error) => {
+                parser.push_error(error.diagnostic);
+                ModModule { body: Vec::new(), range: TextRange::from_usize(0, src.len()) }
+            }
+        },
     };
     let comments = if parser.options.keep_comments { collect_comments(src) } else { Vec::new() };
-    Parsed { module, comments, errors: parser.errors }
+    let tokens = if parser.options.keep_tokens { parser.tokens.clone() } else { Vec::new() };
+    Parsed { module, comments, tokens, errors: parser.errors }
 }
 
 fn collect_comments(src: &str) -> Vec<Comment> {
@@ -197,6 +216,7 @@ impl<'src> Parser<'src> {
             TokenKind::Pass => self.simple_statement(),
             TokenKind::Break => self.simple_statement(),
             TokenKind::Continue => self.simple_statement(),
+            TokenKind::Del => self.delete_statement(),
             TokenKind::Async => self.async_statement(),
             TokenKind::Name if self.word_is("match") => self.try_match_statement(),
             TokenKind::Name if self.word_is("type") && self.looks_like_type_alias() => {
@@ -228,6 +248,7 @@ impl<'src> Parser<'src> {
         }
         let mut statement = match self.current().kind {
             TokenKind::Def => self.function(false)?,
+            TokenKind::Async if self.peek_kind(1) == TokenKind::Def => self.function(true)?,
             TokenKind::Class => self.class()?,
             _ => return Err(self.error_here("expected function or class after decorator")),
         };
@@ -260,7 +281,12 @@ impl<'src> Parser<'src> {
         if self.name_text(keyword) != "match" {
             return Err(self.error_here("expected match"));
         }
-        let subject = Box::new(self.expression(0)?);
+        let subject_first = self.expression(0)?;
+        let subject = if self.at(TokenKind::Comma) {
+            self.comma_expression(subject_first)?
+        } else {
+            subject_first
+        };
         self.expect(TokenKind::Colon)?;
         if !self.options.version.supports(PythonVersion::Py310) {
             self.push_error(Diagnostic::unsupported(
@@ -289,7 +315,11 @@ impl<'src> Parser<'src> {
         }
         self.expect(TokenKind::Dedent)?;
         let end = cases.last().map(Ranged::range).unwrap_or_else(|| self.previous().range).end();
-        Ok(Stmt::Match(StmtMatch { range: TextRange::new(start, end), subject, cases }))
+        Ok(Stmt::Match(StmtMatch {
+            range: TextRange::new(start, end),
+            subject: Box::new(subject),
+            cases,
+        }))
     }
 
     fn type_alias_statement(&mut self) -> Result<Stmt, ParseError> {
@@ -297,7 +327,7 @@ impl<'src> Parser<'src> {
         let name_token = self.expect(TokenKind::Name)?;
         let name = Expr::Name(ExprName {
             range: name_token.range,
-            id: self.name_text(name_token).into(),
+            id: normalize_identifier(self.name_text(name_token)),
             ctx: ExprContext::Store,
         });
         if self.eat(TokenKind::LSqb) {
@@ -330,7 +360,8 @@ impl<'src> Parser<'src> {
         }
         self.expect(TokenKind::Def)?;
         let name_token = self.expect(TokenKind::Name)?;
-        let name = self.name_text(name_token).to_owned().into();
+        let name = normalize_identifier(self.name_text(name_token));
+        self.skip_type_parameters();
         let args = self.parameters()?;
         let returns =
             if self.eat(TokenKind::Arrow) { Some(Box::new(self.expression(0)?)) } else { None };
@@ -356,11 +387,20 @@ impl<'src> Parser<'src> {
     fn class(&mut self) -> Result<Stmt, ParseError> {
         let start = self.expect(TokenKind::Class)?.range.start();
         let name_token = self.expect(TokenKind::Name)?;
-        let name = self.name_text(name_token).to_owned().into();
+        let name = normalize_identifier(self.name_text(name_token));
+        self.skip_type_parameters();
         let mut bases = Vec::new();
         let mut keywords = Vec::new();
         if self.eat(TokenKind::LPar) {
             while !self.at(TokenKind::RPar) && !self.at(TokenKind::EndMarker) {
+                if self.eat(TokenKind::DoubleStar) {
+                    let value = self.expression(0)?;
+                    keywords.push(Keyword { range: value.range(), arg: None, value });
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                    continue;
+                }
                 let value = self.expression(0)?;
                 if let Expr::Name(name_node) = &value {
                     if self.eat(TokenKind::Equal) {
@@ -407,9 +447,30 @@ impl<'src> Parser<'src> {
         let test = Box::new(self.expression(0)?);
         self.expect(TokenKind::Colon)?;
         let body = self.block()?;
-        let orelse = if self.eat(TokenKind::Elif) {
-            self.position -= 1;
-            vec![self.if_statement()?]
+        let orelse = if self.at(TokenKind::Elif) {
+            vec![self.elif_statement()?]
+        } else if self.eat(TokenKind::Else) {
+            self.expect(TokenKind::Colon)?;
+            self.block()?
+        } else {
+            Vec::new()
+        };
+        let end = orelse
+            .last()
+            .map(Ranged::range)
+            .or_else(|| body.last().map(Ranged::range))
+            .unwrap_or_else(|| self.previous().range)
+            .end();
+        Ok(Stmt::If(StmtIf { range: TextRange::new(start, end), test, body, orelse }))
+    }
+
+    fn elif_statement(&mut self) -> Result<Stmt, ParseError> {
+        let start = self.expect(TokenKind::Elif)?.range.start();
+        let test = Box::new(self.expression(0)?);
+        self.expect(TokenKind::Colon)?;
+        let body = self.block()?;
+        let orelse = if self.at(TokenKind::Elif) {
+            vec![self.elif_statement()?]
         } else if self.eat(TokenKind::Else) {
             self.expect(TokenKind::Colon)?;
             self.block()?
@@ -456,7 +517,9 @@ impl<'src> Parser<'src> {
         let target = mark_store(self.comma_expression(target_expression)?)?;
         self.stop_in = false;
         self.expect(TokenKind::In)?;
-        let iter = self.expression(0)?;
+        let iter_first = self.expression(0)?;
+        let iter =
+            if self.at(TokenKind::Comma) { self.comma_expression(iter_first)? } else { iter_first };
         self.expect(TokenKind::Colon)?;
         let body = self.block()?;
         let orelse = if self.eat(TokenKind::Else) {
@@ -489,6 +552,10 @@ impl<'src> Parser<'src> {
         }
         self.expect(TokenKind::With)?;
         let mut items = Vec::new();
+        let parenthesized = self.at(TokenKind::LPar) && self.has_top_level_comma();
+        if parenthesized {
+            self.bump();
+        }
         loop {
             let context_expr = self.expression(0)?;
             let optional_vars =
@@ -506,6 +573,12 @@ impl<'src> Parser<'src> {
             if !self.eat(TokenKind::Comma) {
                 break;
             }
+            if parenthesized && self.at(TokenKind::RPar) {
+                break;
+            }
+        }
+        if parenthesized {
+            self.expect(TokenKind::RPar)?;
         }
         self.expect(TokenKind::Colon)?;
         let body = self.block()?;
@@ -586,7 +659,14 @@ impl<'src> Parser<'src> {
 
     fn return_statement(&mut self) -> Result<Stmt, ParseError> {
         let start = self.expect(TokenKind::Return)?.range.start();
-        let value = if self.at_line_end() { None } else { Some(Box::new(self.expression(0)?)) };
+        let value = if self.at_line_end() {
+            None
+        } else {
+            let first = self.expression(0)?;
+            let value =
+                if self.at(TokenKind::Comma) { self.comma_expression(first)? } else { first };
+            Some(Box::new(value))
+        };
         let end = value
             .as_ref()
             .map(|value| value.range())
@@ -656,10 +736,11 @@ impl<'src> Parser<'src> {
         if self.eat(TokenKind::Star) {
             names.push(Alias { range: self.previous().range, name: "*".into(), asname: None });
         } else {
+            let parenthesized = self.eat(TokenKind::LPar);
             loop {
                 let name_start = self.current().range.start();
                 let name_token = self.expect(TokenKind::Name)?;
-                let name = self.name_text(name_token).to_owned();
+                let name = normalize_identifier(self.name_text(name_token));
                 let asname = if self.eat(TokenKind::As) {
                     let as_token = self.expect(TokenKind::Name)?;
                     Some(self.name_text(as_token).to_owned().into())
@@ -667,14 +748,16 @@ impl<'src> Parser<'src> {
                     None
                 };
                 let end = self.previous().range.end();
-                names.push(Alias {
-                    range: TextRange::new(name_start, end),
-                    name: name.into(),
-                    asname,
-                });
+                names.push(Alias { range: TextRange::new(name_start, end), name, asname });
                 if !self.eat(TokenKind::Comma) {
                     break;
                 }
+                if parenthesized && self.at(TokenKind::RPar) {
+                    break;
+                }
+            }
+            if parenthesized {
+                self.expect(TokenKind::RPar)?;
             }
         }
         self.consume_line_end();
@@ -716,6 +799,21 @@ impl<'src> Parser<'src> {
         })
     }
 
+    fn delete_statement(&mut self) -> Result<Stmt, ParseError> {
+        let start = self.expect(TokenKind::Del)?.range.start();
+        let first = self.expression(0)?;
+        let targets = if self.at(TokenKind::Comma) { self.comma_expression(first)? } else { first };
+        let targets = match targets {
+            Expr::Tuple(node) => {
+                node.elts.into_iter().map(mark_delete).collect::<Result<Vec<_>, _>>()?
+            }
+            other => vec![mark_delete(other)?],
+        };
+        let end = targets.last().map(Ranged::range).unwrap_or_else(|| self.previous().range).end();
+        self.consume_line_end();
+        Ok(Stmt::Delete(StmtDelete { range: TextRange::new(start, end), targets }))
+    }
+
     fn simple_or_assignment(&mut self) -> Result<Stmt, ParseError> {
         let mut first = self.expression(0)?;
         if self.at(TokenKind::Comma) {
@@ -743,14 +841,19 @@ impl<'src> Parser<'src> {
         }
         if let Some(op) = aug_operator(self.current().kind) {
             self.bump();
-            let value = Box::new(self.expression(0)?);
+            let value_first = self.expression(0)?;
+            let value = if self.at(TokenKind::Comma) {
+                self.comma_expression(value_first)?
+            } else {
+                value_first
+            };
             self.consume_line_end();
             let target = mark_store(first)?;
             return Ok(Stmt::AugAssign(StmtAugAssign {
                 range: TextRange::new(first_start, value.range().end()),
                 target: Box::new(target),
                 op,
-                value,
+                value: Box::new(value),
             }));
         }
         if self.eat(TokenKind::Equal) {
@@ -789,8 +892,17 @@ impl<'src> Parser<'src> {
             self.eat(TokenKind::Dedent);
             Ok(result)
         } else {
-            let statement = self.statement()?;
-            Ok(vec![statement])
+            let mut statements = Vec::new();
+            loop {
+                statements.push(self.statement()?);
+                if self.at(TokenKind::Newline) || self.at(TokenKind::EndMarker) {
+                    break;
+                }
+                if !self.eat(TokenKind::Semi) {
+                    break;
+                }
+            }
+            Ok(statements)
         }
     }
 
@@ -808,10 +920,19 @@ impl<'src> Parser<'src> {
             if self.eat(TokenKind::DoubleStar) {
                 let start = self.previous().range.start();
                 let token = self.expect(TokenKind::Name)?;
+                let annotation = if self.eat(TokenKind::Colon) {
+                    Some(Box::new(self.expression(0)?))
+                } else {
+                    None
+                };
+                let end = annotation
+                    .as_ref()
+                    .map(|value| value.range().end())
+                    .unwrap_or(token.range.end());
                 parameters.kwarg = Some(Parameter {
-                    range: TextRange::new(start, token.range.end()),
-                    name: self.name_text(token).into(),
-                    annotation: None,
+                    range: TextRange::new(start, end),
+                    name: normalize_identifier(self.name_text(token)),
+                    annotation,
                     default: None,
                     type_comment: None,
                 });
@@ -821,10 +942,19 @@ impl<'src> Parser<'src> {
                 let start = self.previous().range.start();
                 if self.at(TokenKind::Name) {
                     let token = self.bump();
+                    let annotation = if self.eat(TokenKind::Colon) {
+                        Some(Box::new(self.expression(0)?))
+                    } else {
+                        None
+                    };
+                    let end = annotation
+                        .as_ref()
+                        .map(|value| value.range().end())
+                        .unwrap_or(token.range.end());
                     parameters.vararg = Some(Parameter {
-                        range: TextRange::new(start, token.range.end()),
-                        name: self.name_text(token).into(),
-                        annotation: None,
+                        range: TextRange::new(start, end),
+                        name: normalize_identifier(self.name_text(token)),
+                        annotation,
                         default: None,
                         type_comment: None,
                     });
@@ -834,7 +964,7 @@ impl<'src> Parser<'src> {
                 }
             } else if self.at(TokenKind::Name) {
                 let token = self.bump();
-                let name = self.name_text(token).to_owned();
+                let name = normalize_identifier(self.name_text(token));
                 let annotation = if self.eat(TokenKind::Colon) {
                     Some(Box::new(self.expression(0)?))
                 } else {
@@ -860,7 +990,7 @@ impl<'src> Parser<'src> {
                     .unwrap_or(token.range.end());
                 let parameter = Parameter {
                     range: TextRange::new(token.range.start(), end),
-                    name: name.into(),
+                    name,
                     annotation,
                     default: default.clone(),
                     type_comment: None,
@@ -888,9 +1018,43 @@ impl<'src> Parser<'src> {
     fn pattern(&mut self) -> Result<Pattern, ParseError> {
         let previous = self.stop_pattern_guard;
         self.stop_pattern_guard = true;
-        let expression = self.expression(0)?;
+        let first = self.expression(0)?;
+        let expression =
+            if self.at(TokenKind::Comma) { self.comma_expression(first)? } else { first };
         self.stop_pattern_guard = previous;
-        Ok(pattern_from_expr(expression))
+        let pattern = pattern_from_expr(expression);
+        if self.eat(TokenKind::As) {
+            let name = self.expect(TokenKind::Name)?;
+            let range = TextRange::new(pattern.range().start(), name.range.end());
+            if self.eat(TokenKind::Comma) {
+                while !matches!(self.current().kind, TokenKind::Colon | TokenKind::EndMarker) {
+                    self.bump();
+                }
+            }
+            Ok(Pattern::As(PatternAs {
+                range,
+                pattern: Some(Box::new(pattern)),
+                name: Some(self.name_text(name).to_owned().into()),
+            }))
+        } else {
+            Ok(pattern)
+        }
+    }
+
+    fn skip_type_parameters(&mut self) {
+        if !self.eat(TokenKind::LSqb) {
+            return;
+        }
+        let mut depth = 1u32;
+        while depth > 0 && !self.at(TokenKind::EndMarker) {
+            if self.eat(TokenKind::LSqb) {
+                depth += 1;
+            } else if self.eat(TokenKind::RSqb) {
+                depth = depth.saturating_sub(1);
+            } else {
+                self.bump();
+            }
+        }
     }
 
     fn comma_expression(&mut self, first: Expr) -> Result<Expr, ParseError> {
@@ -899,7 +1063,11 @@ impl<'src> Parser<'src> {
         }
         let start = first.range().start();
         let mut elts = vec![first];
-        while !self.at_line_end() && !self.at(TokenKind::Equal) && !self.at(TokenKind::Colon) {
+        while !self.at_line_end()
+            && !self.at(TokenKind::Equal)
+            && !self.at(TokenKind::Colon)
+            && !self.at(TokenKind::In)
+        {
             elts.push(self.expression(0)?);
             if !self.eat(TokenKind::Comma) {
                 break;
@@ -1067,7 +1235,11 @@ impl<'src> Parser<'src> {
             }
             TokenKind::Yield => {
                 self.bump();
-                let value = if self.at_line_end() {
+                let value = if self.at_line_end()
+                    || matches!(
+                        self.current().kind,
+                        TokenKind::RPar | TokenKind::RSqb | TokenKind::RBrace | TokenKind::Comma
+                    ) {
                     None
                 } else if self.eat(TokenKind::From) {
                     Some((true, self.expression(0)?))
@@ -1112,7 +1284,7 @@ impl<'src> Parser<'src> {
         match token.kind {
             TokenKind::Name => Ok(Expr::Name(ExprName {
                 range: token.range,
-                id: self.name_text(token).into(),
+                id: normalize_identifier(self.name_text(token)),
                 ctx: ExprContext::Load,
             })),
             TokenKind::True | TokenKind::False => Ok(Expr::BooleanLiteral(ExprBoolean {
@@ -1126,7 +1298,7 @@ impl<'src> Parser<'src> {
             TokenKind::LPar => {
                 let first = if self.at(TokenKind::RPar) { None } else { Some(self.expression(0)?) };
                 if let Some(first) = first.as_ref() {
-                    if self.at(TokenKind::For) {
+                    if self.at_comprehension_for() {
                         let generators = self.generators()?;
                         let end = self.expect(TokenKind::RPar)?.range.end();
                         return Ok(Expr::GeneratorExp(ExprComprehension {
@@ -1139,16 +1311,19 @@ impl<'src> Parser<'src> {
                     }
                 }
                 let mut items = first.into_iter().collect::<Vec<_>>();
-                let mut tuple = self.eat(TokenKind::Comma);
-                if tuple && !self.at(TokenKind::RPar) {
-                    items.push(self.expression(0)?);
-                }
-                while self.eat(TokenKind::Comma) {
+                let mut tuple = false;
+                loop {
+                    if self.stop_pattern_guard && self.eat(TokenKind::As) {
+                        self.expect(TokenKind::Name)?;
+                    }
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                    tuple = true;
                     if self.at(TokenKind::RPar) {
                         break;
                     }
                     items.push(self.expression(0)?);
-                    tuple = true;
                 }
                 let end = self.expect(TokenKind::RPar)?.range.end();
                 if tuple || items.len() != 1 {
@@ -1168,7 +1343,7 @@ impl<'src> Parser<'src> {
                 let mut items = Vec::new();
                 if !self.at(TokenKind::RSqb) && !self.at(TokenKind::EndMarker) {
                     let first = self.expression(0)?;
-                    if self.at(TokenKind::For) {
+                    if self.at_comprehension_for() {
                         let generators = self.generators()?;
                         let end = self.expect(TokenKind::RSqb)?.range.end();
                         return Ok(Expr::ListComp(ExprComprehension {
@@ -1207,15 +1382,23 @@ impl<'src> Parser<'src> {
                 values: Vec::new(),
             }));
         }
-        let first = self.expression(0)?;
-        let is_dict = self.eat(TokenKind::Colon);
+        let unpacked_first =
+            if self.eat(TokenKind::DoubleStar) { Some(self.expression(0)?) } else { None };
+        let first = if unpacked_first.is_some() { None } else { Some(self.expression(0)?) };
+        let has_unpack = unpacked_first.is_some();
+        let is_dict = unpacked_first.is_some() || self.eat(TokenKind::Colon);
         let mut keys = Vec::new();
         let mut values = Vec::new();
         let mut elts = Vec::new();
         if is_dict {
-            keys.push(Some(first));
-            values.push(self.expression(0)?);
-            if self.at(TokenKind::For) {
+            if let Some(value) = unpacked_first {
+                keys.push(None);
+                values.push(value);
+            } else {
+                keys.push(Some(first.expect("first dictionary key")));
+                values.push(self.expression(0)?);
+            }
+            if !has_unpack && self.at_comprehension_for() {
                 let generators = self.generators()?;
                 let end = self.expect(TokenKind::RBrace)?.range.end();
                 let key = keys.pop().flatten().unwrap_or(Expr::Invalid(ExprInvalid {
@@ -1238,14 +1421,19 @@ impl<'src> Parser<'src> {
                 if self.at(TokenKind::RBrace) {
                     break;
                 }
-                let key = self.expression(0)?;
-                self.expect(TokenKind::Colon)?;
-                keys.push(Some(key));
-                values.push(self.expression(0)?);
+                if self.eat(TokenKind::DoubleStar) {
+                    keys.push(None);
+                    values.push(self.expression(0)?);
+                } else {
+                    let key = self.expression(0)?;
+                    self.expect(TokenKind::Colon)?;
+                    keys.push(Some(key));
+                    values.push(self.expression(0)?);
+                }
             }
         } else {
-            elts.push(first);
-            if self.at(TokenKind::For) {
+            elts.push(first.expect("first set element"));
+            if self.at_comprehension_for() {
                 let generators = self.generators()?;
                 let end = self.expect(TokenKind::RBrace)?.range.end();
                 return Ok(Expr::SetComp(ExprComprehension {
@@ -1273,15 +1461,26 @@ impl<'src> Parser<'src> {
 
     fn generators(&mut self) -> Result<Vec<Comprehension>, ParseError> {
         let mut generators = Vec::new();
-        while self.eat(TokenKind::For) {
-            let start = self.previous().range.start();
+        while self.at_comprehension_for() {
+            let start = self.current().range.start();
             let is_async = self.eat(TokenKind::Async);
+            self.expect(TokenKind::For)?;
             self.stop_in = true;
-            let target = self.expression(0)?;
+            let target_first = self.expression(0)?;
+            let target = if self.at(TokenKind::Comma) {
+                self.comma_expression(target_first)?
+            } else {
+                target_first
+            };
             self.stop_in = false;
             let target = mark_store(target)?;
             self.expect(TokenKind::In)?;
-            let iter = self.expression(2)?;
+            let iter_first = self.expression(2)?;
+            let iter = if self.at(TokenKind::Comma) {
+                self.comma_expression(iter_first)?
+            } else {
+                iter_first
+            };
             let mut ifs = Vec::new();
             while self.eat(TokenKind::If) {
                 ifs.push(self.expression(2)?);
@@ -1307,7 +1506,7 @@ impl<'src> Parser<'src> {
                 TokenKind::Dot => {
                     self.bump();
                     let name = self.expect(TokenKind::Name)?;
-                    let attr = self.name_text(name).to_owned().into();
+                    let attr = normalize_identifier(self.name_text(name));
                     let range = TextRange::new(expression.range().start(), name.range.end());
                     expression = Expr::Attribute(ExprAttribute {
                         range,
@@ -1321,6 +1520,7 @@ impl<'src> Parser<'src> {
                     self.bump();
                     let mut args = Vec::new();
                     let mut keywords = Vec::new();
+                    let mut generator_arg: Option<(Expr, Vec<Comprehension>)> = None;
                     while !self.at(TokenKind::RPar) && !self.at(TokenKind::EndMarker) {
                         if self.eat(TokenKind::DoubleStar) {
                             let value = self.expression(0)?;
@@ -1337,6 +1537,11 @@ impl<'src> Parser<'src> {
                             }));
                         } else {
                             let value = self.expression(0)?;
+                            if self.at_comprehension_for() {
+                                let generators = self.generators()?;
+                                generator_arg = Some((value, generators));
+                                break;
+                            }
                             if let Expr::Name(node) = &value {
                                 if self.eat(TokenKind::Equal) {
                                     let keyword_value = self.expression(0)?;
@@ -1360,6 +1565,15 @@ impl<'src> Parser<'src> {
                         }
                     }
                     let end = self.expect(TokenKind::RPar)?.range.end();
+                    if let Some((elt, generators)) = generator_arg {
+                        args.push(Expr::GeneratorExp(ExprComprehension {
+                            range: TextRange::new(elt.range().start(), end),
+                            elt: Box::new(elt),
+                            generators,
+                            key: None,
+                            value: None,
+                        }));
+                    }
                     expression = Expr::Call(ExprCall {
                         range: TextRange::new(start, end),
                         func: Box::new(expression),
@@ -1370,46 +1584,33 @@ impl<'src> Parser<'src> {
                 TokenKind::LSqb => {
                     let start = expression.range().start();
                     self.bump();
-                    let lower = if self.at(TokenKind::Colon) || self.at(TokenKind::RSqb) {
-                        None
-                    } else {
-                        Some(Box::new(self.expression(0)?))
-                    };
-                    let slice = if self.eat(TokenKind::Colon) {
-                        let upper = if self.at(TokenKind::Colon) || self.at(TokenKind::RSqb) {
-                            None
-                        } else {
-                            Some(Box::new(self.expression(0)?))
-                        };
-                        let step = if self.eat(TokenKind::Colon) {
-                            if self.at(TokenKind::RSqb) {
-                                None
-                            } else {
-                                Some(Box::new(self.expression(0)?))
+                    let mut slices = Vec::new();
+                    if !self.at(TokenKind::RSqb) {
+                        loop {
+                            slices.push(self.subscript_item(start)?);
+                            if !self.eat(TokenKind::Comma) || self.at(TokenKind::RSqb) {
+                                break;
                             }
-                        } else {
-                            None
-                        };
-                        let slice_start =
-                            lower.as_ref().map(|value| value.range().start()).unwrap_or(start);
-                        let slice_end = step
-                            .as_ref()
-                            .or(upper.as_ref())
-                            .map(|value| value.range().end())
-                            .unwrap_or_else(|| self.previous().range.end());
-                        Expr::Slice(ExprSlice {
-                            range: TextRange::new(slice_start, slice_end),
-                            lower,
-                            upper,
-                            step,
+                        }
+                    }
+                    let end = self.expect(TokenKind::RSqb)?.range.end();
+                    let slice = if slices.len() == 1 {
+                        slices.pop().expect("one subscript item")
+                    } else if slices.is_empty() {
+                        Expr::Invalid(ExprInvalid {
+                            range: TextRange::new(start, end),
+                            message: "empty subscript".into(),
                         })
                     } else {
-                        lower.map(|v| *v).unwrap_or(Expr::Invalid(ExprInvalid {
-                            range: self.previous().range,
-                            message: "empty subscript".into(),
-                        }))
+                        Expr::Tuple(ExprSequence {
+                            range: TextRange::new(
+                                slices.first().map(Ranged::range).unwrap_or_default().start(),
+                                slices.last().map(Ranged::range).unwrap_or_default().end(),
+                            ),
+                            elts: slices,
+                            ctx: ExprContext::Load,
+                        })
                     };
-                    let end = self.expect(TokenKind::RSqb)?.range.end();
                     expression = Expr::Subscript(ExprSubscript {
                         range: TextRange::new(start, end),
                         value: Box::new(expression),
@@ -1423,23 +1624,107 @@ impl<'src> Parser<'src> {
         Ok(expression)
     }
 
+    fn subscript_item(&mut self, start: crate::source::TextSize) -> Result<Expr, ParseError> {
+        let lower =
+            if self.at(TokenKind::Colon) || self.at(TokenKind::Comma) || self.at(TokenKind::RSqb) {
+                None
+            } else {
+                Some(Box::new(self.expression(0)?))
+            };
+        if !self.eat(TokenKind::Colon) {
+            return Ok(lower.map(|value| *value).unwrap_or(Expr::Invalid(ExprInvalid {
+                range: TextRange::empty(start),
+                message: "empty subscript".into(),
+            })));
+        }
+        let upper =
+            if self.at(TokenKind::Colon) || self.at(TokenKind::Comma) || self.at(TokenKind::RSqb) {
+                None
+            } else {
+                Some(Box::new(self.expression(0)?))
+            };
+        let step = if self.eat(TokenKind::Colon) {
+            if self.at(TokenKind::Comma) || self.at(TokenKind::RSqb) {
+                None
+            } else {
+                Some(Box::new(self.expression(0)?))
+            }
+        } else {
+            None
+        };
+        let slice_start = lower.as_ref().map(|value| value.range().start()).unwrap_or(start);
+        let slice_end = step
+            .as_ref()
+            .or(upper.as_ref())
+            .map(|value| value.range().end())
+            .unwrap_or_else(|| self.previous().range.end());
+        Ok(Expr::Slice(ExprSlice {
+            range: TextRange::new(slice_start, slice_end),
+            lower,
+            upper,
+            step,
+        }))
+    }
+
     fn parameters_without_parentheses(&mut self) -> Result<Parameters, ParseError> {
         let mut parameters = Parameters::default();
-        while self.at(TokenKind::Name) {
-            let token = self.bump();
-            let name = self.name_text(token).to_owned();
-            let default =
-                if self.eat(TokenKind::Equal) { Some(Box::new(self.expression(0)?)) } else { None };
-            parameters.args.push(Parameter {
-                range: TextRange::new(
-                    token.range.start(),
-                    default.as_ref().map(|v| v.range()).unwrap_or(token.range).end(),
-                ),
-                name: name.into(),
-                annotation: None,
-                default,
-                type_comment: None,
-            });
+        let mut keyword_only = false;
+        while !self.at(TokenKind::Colon) && !self.at(TokenKind::EndMarker) {
+            if self.eat(TokenKind::Slash) {
+                parameters.posonlyargs.append(&mut parameters.args);
+                self.eat(TokenKind::Comma);
+                continue;
+            } else if self.eat(TokenKind::DoubleStar) {
+                let start = self.previous().range.start();
+                let token = self.expect(TokenKind::Name)?;
+                parameters.kwarg = Some(Parameter {
+                    range: TextRange::new(start, token.range.end()),
+                    name: normalize_identifier(self.name_text(token)),
+                    annotation: None,
+                    default: None,
+                    type_comment: None,
+                });
+            } else if self.eat(TokenKind::Star) {
+                let start = self.previous().range.start();
+                if self.at(TokenKind::Name) {
+                    let token = self.bump();
+                    parameters.vararg = Some(Parameter {
+                        range: TextRange::new(start, token.range.end()),
+                        name: normalize_identifier(self.name_text(token)),
+                        annotation: None,
+                        default: None,
+                        type_comment: None,
+                    });
+                }
+                keyword_only = true;
+            } else {
+                let token = self.expect(TokenKind::Name)?;
+                let name = normalize_identifier(self.name_text(token));
+                let default = if self.eat(TokenKind::Equal) {
+                    Some(Box::new(self.expression(0)?))
+                } else {
+                    None
+                };
+                let parameter = Parameter {
+                    range: TextRange::new(
+                        token.range.start(),
+                        default.as_ref().map(|v| v.range()).unwrap_or(token.range).end(),
+                    ),
+                    name,
+                    annotation: None,
+                    default: default.clone(),
+                    type_comment: None,
+                };
+                if keyword_only {
+                    parameters.kwonlyargs.push(parameter);
+                    parameters.kw_defaults.push(default.map(|value| *value));
+                } else {
+                    if let Some(default) = &default {
+                        parameters.defaults.push((**default).clone());
+                    }
+                    parameters.args.push(parameter);
+                }
+            }
             if !self.eat(TokenKind::Comma) {
                 break;
             }
@@ -1544,6 +1829,31 @@ impl<'src> Parser<'src> {
     }
     fn at_word(&self, word: &str) -> bool {
         self.word_is(word)
+    }
+    fn at_comprehension_for(&self) -> bool {
+        self.at(TokenKind::For)
+            || (self.at(TokenKind::Async) && self.peek_kind(1) == TokenKind::For)
+    }
+    fn has_top_level_comma(&self) -> bool {
+        if !self.at(TokenKind::LPar) {
+            return false;
+        }
+        let mut depth = 1u32;
+        for token in self.tokens.iter().skip(self.position + 1) {
+            match token.kind {
+                TokenKind::LPar | TokenKind::LSqb | TokenKind::LBrace => depth += 1,
+                TokenKind::RPar => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                TokenKind::RSqb | TokenKind::RBrace => depth = depth.saturating_sub(1),
+                TokenKind::Comma if depth == 1 => return true,
+                _ => {}
+            }
+        }
+        false
     }
     fn looks_like_type_alias(&self) -> bool {
         self.peek_kind(1) == TokenKind::Name
@@ -1660,6 +1970,51 @@ fn unescape(value: &str) -> String {
     output
 }
 
+fn normalize_identifier(value: &str) -> Box<str> {
+    if !cfg!(feature = "nfkc") || value.is_ascii() {
+        return value.into();
+    }
+    let mut normalized = String::with_capacity(value.len());
+    for character in value.chars() {
+        let replacement = match character {
+            'ａ'..='ｚ' | 'Ａ'..='Ｚ' | '０'..='９' => {
+                char::from_u32(character as u32 - 0xfee0).unwrap_or(character)
+            }
+            '　' => ' ',
+            'ｱ' => 'ア',
+            'ｲ' => 'イ',
+            'ｳ' => 'ウ',
+            'ｴ' => 'エ',
+            'ｵ' => 'オ',
+            'ﬀ' => 'f',
+            'ﬁ' => 'f',
+            'ﬂ' => 'f',
+            'ﬃ' => 'f',
+            'ﬄ' => 'f',
+            'ﬅ' => 's',
+            'ﬆ' => 's',
+            _ => character,
+        };
+        normalized.push(replacement);
+        match character {
+            'ﬀ' => normalized.push('f'),
+            'ﬁ' => normalized.push('i'),
+            'ﬂ' => normalized.push('l'),
+            'ﬃ' => {
+                normalized.push('f');
+                normalized.push('i');
+            }
+            'ﬄ' => {
+                normalized.push('f');
+                normalized.push('l');
+            }
+            'ﬅ' | 'ﬆ' => normalized.push('t'),
+            _ => {}
+        }
+    }
+    normalized.into_boxed_str()
+}
+
 fn mark_store(expression: Expr) -> Result<Expr, ParseError> {
     match expression {
         Expr::Name(mut node) => {
@@ -1690,6 +2045,34 @@ fn mark_store(expression: Expr) -> Result<Expr, ParseError> {
             Ok(Expr::List(node))
         }
         other => Err(ParseError::syntax(other.range(), "cannot assign to expression")),
+    }
+}
+
+fn mark_delete(expression: Expr) -> Result<Expr, ParseError> {
+    match expression {
+        Expr::Name(mut node) => {
+            node.ctx = ExprContext::Del;
+            Ok(Expr::Name(node))
+        }
+        Expr::Attribute(mut node) => {
+            node.ctx = ExprContext::Del;
+            Ok(Expr::Attribute(node))
+        }
+        Expr::Subscript(mut node) => {
+            node.ctx = ExprContext::Del;
+            Ok(Expr::Subscript(node))
+        }
+        Expr::Tuple(mut node) => {
+            node.ctx = ExprContext::Del;
+            node.elts = node.elts.into_iter().map(mark_delete).collect::<Result<_, _>>()?;
+            Ok(Expr::Tuple(node))
+        }
+        Expr::List(mut node) => {
+            node.ctx = ExprContext::Del;
+            node.elts = node.elts.into_iter().map(mark_delete).collect::<Result<_, _>>()?;
+            Ok(Expr::List(node))
+        }
+        other => Err(ParseError::syntax(other.range(), "cannot delete expression")),
     }
 }
 
