@@ -335,9 +335,9 @@ impl<'src> Scanner<'src> {
 
     fn scan_name(&mut self) {
         let start = self.position;
-        self.position += self.src[self.position..].chars().next().unwrap().len_utf8();
+        self.position += char_len_at(self.src, self.position);
         while self.position < self.src.len() {
-            let character = self.src[self.position..].chars().next().unwrap();
+            let character = self.src[self.position..].chars().next().unwrap_or('\0');
             if !is_identifier_continue(character) {
                 break;
             }
@@ -501,10 +501,10 @@ impl<'src> Scanner<'src> {
             if self.src.as_bytes()[cursor] == b'\\' {
                 cursor += 1;
                 if cursor < self.src.len() {
-                    cursor += self.src[cursor..].chars().next().unwrap().len_utf8();
+                    cursor += char_len_at(self.src, cursor);
                 }
             } else {
-                cursor += self.src[cursor..].chars().next().unwrap().len_utf8();
+                cursor += char_len_at(self.src, cursor);
             }
         }
         self.error(
@@ -534,7 +534,7 @@ impl<'src> Scanner<'src> {
                 if byte == b'\\' {
                     cursor += 1;
                     if cursor < self.src.len() {
-                        cursor += self.src[cursor..].chars().next().unwrap().len_utf8();
+                        cursor += char_len_at(self.src, cursor);
                     }
                 } else if string_triple
                     && self.src.as_bytes().get(cursor..cursor + 3)
@@ -546,7 +546,7 @@ impl<'src> Scanner<'src> {
                     string_quote = None;
                     cursor += 1;
                 } else {
-                    cursor += self.src[cursor..].chars().next().unwrap().len_utf8();
+                    cursor += char_len_at(self.src, cursor);
                 }
                 continue;
             }
@@ -554,7 +554,7 @@ impl<'src> Scanner<'src> {
                 if byte == b'\\' {
                     cursor += 1;
                     if self.src.as_bytes().get(cursor) == Some(&quote) {
-                        cursor += self.src[cursor..].chars().next().unwrap().len_utf8();
+                        cursor += char_len_at(self.src, cursor);
                     }
                     continue;
                 }
@@ -579,7 +579,7 @@ impl<'src> Scanner<'src> {
                 } else if byte == b'{' || byte == b'}' {
                     cursor += 2;
                 } else {
-                    cursor += self.src[cursor..].chars().next().unwrap().len_utf8();
+                    cursor += char_len_at(self.src, cursor);
                 }
             } else {
                 match byte {
@@ -597,7 +597,7 @@ impl<'src> Scanner<'src> {
                         field_depth = field_depth.saturating_sub(1);
                         cursor += 1;
                     }
-                    _ => cursor += self.src[cursor..].chars().next().unwrap().len_utf8(),
+                    _ => cursor += char_len_at(self.src, cursor),
                 }
             }
         }
@@ -690,6 +690,10 @@ impl<'src> Scanner<'src> {
             ),
         }));
     }
+}
+
+fn char_len_at(source: &str, position: usize) -> usize {
+    source.get(position..).and_then(|tail| tail.chars().next()).map_or(1, char::len_utf8)
 }
 
 fn is_identifier_start(character: char) -> bool {

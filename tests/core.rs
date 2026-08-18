@@ -1,9 +1,17 @@
 #![allow(missing_docs)]
 
+use std::mem::size_of;
+
 use pysyn::ast::{Expr, ExprContext, Stmt};
 use pysyn::lexer::{tokenize_with, LexMode, LexOptions};
 use pysyn::parser::{parse, ParseMode, ParseOptions};
 use pysyn::token::{PythonVersion, TokenKind};
+
+#[test]
+fn ast_enums_remain_compact() {
+    assert!(size_of::<Expr>() <= 64, "Expr is {} bytes", size_of::<Expr>());
+    assert!(size_of::<Stmt>() <= 96, "Stmt is {} bytes", size_of::<Stmt>());
+}
 
 #[test]
 fn tokenizes_keywords_soft_keywords_and_indentation() {

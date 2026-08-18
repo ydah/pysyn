@@ -381,7 +381,11 @@ impl<'src> Parser<'src> {
             body,
             type_comment: None,
         };
-        Ok(if is_async { Stmt::AsyncFunctionDef(node) } else { Stmt::FunctionDef(node) })
+        Ok(if is_async {
+            Stmt::AsyncFunctionDef(Box::new(node))
+        } else {
+            Stmt::FunctionDef(Box::new(node))
+        })
     }
 
     fn class(&mut self) -> Result<Stmt, ParseError> {
@@ -431,7 +435,7 @@ impl<'src> Parser<'src> {
             start,
             body.last().map(Ranged::range).unwrap_or_else(|| self.previous().range).end(),
         );
-        Ok(Stmt::ClassDef(StmtClassDef {
+        Ok(Stmt::ClassDef(Box::new(StmtClassDef {
             range,
             name,
             bases,
@@ -439,7 +443,7 @@ impl<'src> Parser<'src> {
             decorator_list: Vec::new(),
             type_params: Vec::new(),
             body,
-        }))
+        })))
     }
 
     fn if_statement(&mut self) -> Result<Stmt, ParseError> {
@@ -654,7 +658,7 @@ impl<'src> Parser<'src> {
             .unwrap_or_else(|| self.previous().range)
             .end();
         let node = StmtTry { range: TextRange::new(start, end), body, handlers, orelse, finalbody };
-        Ok(if is_star { Stmt::TryStar(node) } else { Stmt::Try(node) })
+        Ok(if is_star { Stmt::TryStar(Box::new(node)) } else { Stmt::Try(Box::new(node)) })
     }
 
     fn return_statement(&mut self) -> Result<Stmt, ParseError> {
@@ -1143,12 +1147,12 @@ impl<'src> Parser<'src> {
                         left.range().start(),
                         comparators.last().map(Ranged::range).unwrap_or(left.range()).end(),
                     );
-                    left = Expr::Compare(ExprCompare {
+                    left = Expr::Compare(Box::new(ExprCompare {
                         range,
                         left: Box::new(left),
                         ops,
                         comparators,
-                    });
+                    }));
                     continue;
                 }
             }
@@ -1268,11 +1272,11 @@ impl<'src> Parser<'src> {
                 let args = self.parameters_without_parentheses()?;
                 self.expect(TokenKind::Colon)?;
                 let body = self.expression(0)?;
-                Expr::Lambda(ExprLambda {
+                Expr::Lambda(Box::new(ExprLambda {
                     range: TextRange::new(token.range.start(), body.range().end()),
                     args,
                     body: Box::new(body),
-                })
+                }))
             }
             _ => self.atom()?,
         };
@@ -1395,7 +1399,10 @@ impl<'src> Parser<'src> {
                 keys.push(None);
                 values.push(value);
             } else {
-                keys.push(Some(first.expect("first dictionary key")));
+                let Some(first) = first else {
+                    return Err(self.error_here("expected dictionary key"));
+                };
+                keys.push(Some(first));
                 values.push(self.expression(0)?);
             }
             if !has_unpack && self.at_comprehension_for() {
@@ -1432,7 +1439,10 @@ impl<'src> Parser<'src> {
                 }
             }
         } else {
-            elts.push(first.expect("first set element"));
+            let Some(first) = first else {
+                return Err(self.error_here("expected set element"));
+            };
+            elts.push(first);
             if self.at_comprehension_for() {
                 let generators = self.generators()?;
                 let end = self.expect(TokenKind::RBrace)?.range.end();
@@ -1574,12 +1584,12 @@ impl<'src> Parser<'src> {
                             value: None,
                         }));
                     }
-                    expression = Expr::Call(ExprCall {
+                    expression = Expr::Call(Box::new(ExprCall {
                         range: TextRange::new(start, end),
                         func: Box::new(expression),
                         args,
                         keywords,
-                    });
+                    }));
                 }
                 TokenKind::LSqb => {
                     let start = expression.range().start();
@@ -1595,7 +1605,10 @@ impl<'src> Parser<'src> {
                     }
                     let end = self.expect(TokenKind::RSqb)?.range.end();
                     let slice = if slices.len() == 1 {
-                        slices.pop().expect("one subscript item")
+                        slices.pop().unwrap_or(Expr::Invalid(ExprInvalid {
+                            range: TextRange::new(start, end),
+                            message: "empty subscript".into(),
+                        }))
                     } else if slices.is_empty() {
                         Expr::Invalid(ExprInvalid {
                             range: TextRange::new(start, end),
