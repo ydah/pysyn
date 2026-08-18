@@ -68,7 +68,15 @@ fn main() {
             }
         },
         "check" => match pysyn::parse_module(&source) {
-            Ok(_) => println!("ok"),
+            Ok(module) => {
+                let diagnostics =
+                    pysyn::validate::validate(&module, pysyn::validate::ValidateLevel::Semantic);
+                if let Some(diagnostic) = diagnostics.into_iter().next() {
+                    eprintln!("{}", diagnostic.display_with_source("<stdin>", &source));
+                    std::process::exit(1);
+                }
+                println!("ok");
+            }
             Err(error) => {
                 eprintln!("{}", error.diagnostic.display_with_source("<stdin>", &source));
                 std::process::exit(1);

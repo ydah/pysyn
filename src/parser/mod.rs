@@ -439,12 +439,39 @@ impl<'src> Parser<'src> {
         let error_count = self.errors.len();
         match self.match_statement() {
             Ok(statement) => Ok(statement),
-            Err(_) => {
+            Err(_error) if !self.looks_like_match_statement(checkpoint) => {
                 self.position = checkpoint;
                 self.errors.truncate(error_count);
                 self.simple_or_assignment()
             }
+            Err(error) => Err(error),
         }
+    }
+
+    fn looks_like_match_statement(&self, start: usize) -> bool {
+        let mut depth = 0u32;
+        for (offset, token) in self.tokens.iter().enumerate().skip(start + 1) {
+            match token.kind {
+                TokenKind::LPar | TokenKind::LSqb | TokenKind::LBrace => depth += 1,
+                TokenKind::RPar | TokenKind::RSqb | TokenKind::RBrace => {
+                    depth = depth.saturating_sub(1);
+                }
+                TokenKind::Colon if depth == 0 => {
+                    return self.tokens.get(offset + 1).is_some_and(|next| {
+                        next.kind == TokenKind::Newline
+                            && self
+                                .tokens
+                                .get(offset + 2)
+                                .is_some_and(|indent| indent.kind == TokenKind::Indent)
+                    });
+                }
+                TokenKind::Newline | TokenKind::Semi | TokenKind::EndMarker if depth == 0 => {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn match_statement(&mut self) -> Result<Stmt, ParseError> {
@@ -914,6 +941,9 @@ impl<'src> Parser<'src> {
                 break;
             }
         }
+        if self.at(TokenKind::From) {
+            return Err(ParseError::syntax(TextRange::empty(start), "invalid import statement"));
+        }
         let end = self.statement_end(names.last().map(Ranged::range).unwrap_or_default().end());
         self.consume_line_end();
         Ok(Stmt::Import(StmtImport { range: TextRange::new(start, end), names }))
@@ -1024,6 +1054,12 @@ impl<'src> Parser<'src> {
         let first_start = self.expression_range(&first).start();
         if self.eat(TokenKind::Colon) {
             let target = mark_store(first)?;
+            if !matches!(target, Expr::Name(_) | Expr::Attribute(_) | Expr::Subscript(_)) {
+                return Err(ParseError::syntax(
+                    target.range(),
+                    "annotated assignment target must be a name or attribute",
+                ));
+            }
             let annotation = Box::new(self.expression(0)?);
             let value =
                 if self.eat(TokenKind::Equal) { Some(Box::new(self.expression(0)?)) } else { None };
@@ -1054,7 +1090,7 @@ impl<'src> Parser<'src> {
             };
             let end = self.statement_end(value.range().end());
             self.consume_line_end();
-            let target = mark_store(first)?;
+            let target = mark_augmented_store(first)?;
             return Ok(Stmt::AugAssign(StmtAugAssign {
                 range: TextRange::new(first_start, end),
                 target: Box::new(target),
@@ -1115,14 +1151,39 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::LPar)?;
         let mut parameters = Parameters::default();
         let mut seen_default = false;
+        let mut seen_slash = false;
+        let mut seen_kwarg = false;
         let mut keyword_only = false;
         while !self.at(TokenKind::RPar) && !self.at(TokenKind::EndMarker) {
-            if self.eat(TokenKind::Slash) {
+            if self.at(TokenKind::Slash) {
+                let separator = self.bump();
+                if seen_slash
+                    || parameters.args.is_empty()
+                    || keyword_only
+                    || parameters.vararg.is_some()
+                    || seen_kwarg
+                {
+                    return Err(ParseError::syntax(
+                        separator.range,
+                        "invalid positional-only separator",
+                    ));
+                }
+                seen_slash = true;
                 parameters.posonlyargs.append(&mut parameters.args);
-                self.eat(TokenKind::Comma);
+                if !self.eat(TokenKind::Comma) && !self.at(TokenKind::RPar) {
+                    return Err(self.error_here("expected ',' after positional-only separator"));
+                }
                 continue;
             }
-            if self.eat(TokenKind::DoubleStar) {
+            if self.at(TokenKind::DoubleStar) {
+                let separator = self.bump();
+                if seen_kwarg {
+                    return Err(ParseError::syntax(
+                        separator.range,
+                        "duplicate keyword parameter section",
+                    ));
+                }
+                seen_kwarg = true;
                 let token = self.expect(TokenKind::Name)?;
                 let annotation = if self.eat(TokenKind::Colon) {
                     Some(Box::new(self.expression(0)?))
@@ -1142,7 +1203,14 @@ impl<'src> Parser<'src> {
                 });
                 self.eat(TokenKind::Comma);
                 continue;
-            } else if self.eat(TokenKind::Star) {
+            } else if self.at(TokenKind::Star) {
+                let separator = self.bump();
+                if seen_kwarg || parameters.vararg.is_some() {
+                    return Err(ParseError::syntax(
+                        separator.range,
+                        "duplicate variadic parameter",
+                    ));
+                }
                 if self.at(TokenKind::Name) {
                     let token = self.bump();
                     let annotation = if self.eat(TokenKind::Colon) {
@@ -1166,6 +1234,9 @@ impl<'src> Parser<'src> {
                     keyword_only = true;
                 }
             } else if self.at(TokenKind::Name) {
+                if seen_kwarg {
+                    return Err(self.error_here("parameters cannot follow **kwargs"));
+                }
                 let token = self.bump();
                 let name = normalize_identifier(self.name_text(token));
                 let annotation = if self.eat(TokenKind::Colon) {
@@ -1173,16 +1244,23 @@ impl<'src> Parser<'src> {
                 } else {
                     None
                 };
-                let default = if self.eat(TokenKind::Equal) {
+                let default = if self.at(TokenKind::Equal) {
+                    let equal = self.bump();
                     if !keyword_only {
                         seen_default = true;
                     }
-                    Some(Box::new(self.expression(0)?))
+                    Some(Box::new(self.expression(0).map_err(|error| {
+                        ParseError::syntax(
+                            TextRange::empty(equal.range.start()),
+                            error.diagnostic.message,
+                        )
+                    })?))
                 } else {
                     if seen_default && !keyword_only {
-                        return Err(
-                            self.error_here("non-default argument follows default argument")
-                        );
+                        return Err(ParseError::syntax(
+                            token.range,
+                            "non-default argument follows default argument",
+                        ));
                     }
                     None
                 };
@@ -1405,8 +1483,20 @@ impl<'src> Parser<'src> {
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::EndMarker) {
             if self.eat(TokenKind::DoubleStar) {
                 let name = self.expect(TokenKind::Name)?;
+                if self.name_text(name) == "_" {
+                    return Err(ParseError::syntax(
+                        name.range,
+                        "mapping pattern cannot capture '_'",
+                    ));
+                }
+                if rest.is_some() {
+                    return Err(self.error_here("mapping pattern may contain only one ** pattern"));
+                }
                 rest = Some(self.name_text(name).to_owned().into());
             } else {
+                if rest.is_some() {
+                    return Err(self.error_here("mapping pattern ** pattern must be last"));
+                }
                 keys.push(self.pattern_value_expression()?);
                 self.expect(TokenKind::Colon)?;
                 patterns.push(self.pattern()?);
@@ -1538,10 +1628,13 @@ impl<'src> Parser<'src> {
         let mut chain_depth = 0u32;
         loop {
             let kind = self.current().kind;
-            if kind == TokenKind::If && minimum <= 1 {
+            if kind == TokenKind::If && minimum <= 1 && !self.stop_in {
+                let body_start = self.expression_range(&left).start();
                 self.bump();
                 let test = self.expression(0)?;
-                self.expect(TokenKind::Else)?;
+                self.expect(TokenKind::Else).map_err(|error| {
+                    ParseError::syntax(TextRange::empty(body_start), error.diagnostic.message)
+                })?;
                 let orelse = self.expression(1)?;
                 let range = TextRange::new(
                     self.expression_range(&left).start(),
@@ -1627,6 +1720,9 @@ impl<'src> Parser<'src> {
                 return Err(ParseError::too_deep(self.current().range));
             }
             self.bump();
+            if self.at(TokenKind::Not) {
+                return Err(self.error_here("expected expression after binary operator"));
+            }
             let right = self.expression(if right_assoc { precedence } else { precedence + 1 })?;
             let range = TextRange::new(
                 self.expression_range(&left).start(),
@@ -1696,6 +1792,9 @@ impl<'src> Parser<'src> {
                     TokenKind::Tilde => UnaryOperator::Invert,
                     _ => UnaryOperator::Not,
                 };
+                if op != UnaryOperator::Not && self.at(TokenKind::Not) {
+                    return Err(self.error_here("expected expression after unary operator"));
+                }
                 let operand = self.expression(if op == UnaryOperator::Not { 4 } else { 11 })?;
                 Expr::UnaryOp(ExprUnaryOp {
                     range: TextRange::new(
@@ -1716,6 +1815,9 @@ impl<'src> Parser<'src> {
             }
             TokenKind::Yield => {
                 self.bump();
+                if self.at(TokenKind::Equal) {
+                    return Err(ParseError::syntax(token.range, "invalid syntax"));
+                }
                 let value = if self.at_line_end()
                     || matches!(
                         self.current().kind,
@@ -1796,6 +1898,7 @@ impl<'src> Parser<'src> {
             TokenKind::String { prefix, triple } => self.string_expr(token, prefix, triple),
             TokenKind::LPar => {
                 let first = if self.at(TokenKind::RPar) { None } else { Some(self.expression(0)?) };
+                let first_start = first.as_ref().map(|expression| expression.range().start());
                 if let Some(first) = first.as_ref() {
                     if self.at_comprehension_for() {
                         let generators = self.generators()?;
@@ -1821,7 +1924,35 @@ impl<'src> Parser<'src> {
                     }
                     items.push(self.expression(0)?);
                 }
-                let end = self.expect(TokenKind::RPar)?.range.end();
+                let end = self
+                    .expect(TokenKind::RPar)
+                    .map_err(|error| {
+                        let range = if self.at(TokenKind::Equal) {
+                            items
+                                .last()
+                                .map(|expression| TextRange::empty(expression.range().start()))
+                                .or_else(|| first_start.map(TextRange::empty))
+                                .unwrap_or(error.diagnostic.range)
+                        } else if begins_expression(self.previous().kind)
+                            && begins_expression(self.current().kind)
+                        {
+                            items
+                                .last()
+                                .map(|expression| TextRange::empty(expression.range().start()))
+                                .or_else(|| first_start.map(TextRange::empty))
+                                .unwrap_or(error.diagnostic.range)
+                        } else if matches!(
+                            self.current().kind,
+                            TokenKind::Newline | TokenKind::Dedent | TokenKind::EndMarker
+                        ) {
+                            token.range
+                        } else {
+                            first_start.map_or(error.diagnostic.range, TextRange::empty)
+                        };
+                        ParseError::syntax(range, error.diagnostic.message)
+                    })?
+                    .range
+                    .end();
                 if tuple || items.len() != 1 {
                     Ok(Expr::Tuple(ExprSequence {
                         range: TextRange::new(token.range.start(), end),
@@ -1844,6 +1975,7 @@ impl<'src> Parser<'src> {
                 let mut items = Vec::new();
                 if !self.at(TokenKind::RSqb) && !self.at(TokenKind::EndMarker) {
                     let first = self.expression(0)?;
+                    let first_start = first.range().start();
                     if self.at_comprehension_for() {
                         let generators = self.generators()?;
                         let end = self.expect(TokenKind::RSqb)?.range.end();
@@ -1861,9 +1993,33 @@ impl<'src> Parser<'src> {
                             break;
                         }
                         items.push(self.expression(0)?);
+                        if self.at_comprehension_for() {
+                            return Err(ParseError::syntax(
+                                TextRange::empty(first_start),
+                                "did you forget parentheses around the comprehension target?",
+                            ));
+                        }
                     }
                 }
-                let end = self.expect(TokenKind::RSqb)?.range.end();
+                let end = self
+                    .expect(TokenKind::RSqb)
+                    .map_err(|error| {
+                        let range = if self.at(TokenKind::Equal) {
+                            items
+                                .last()
+                                .map(|item| TextRange::empty(item.range().start()))
+                                .unwrap_or(error.diagnostic.range)
+                        } else if begins_expression(self.previous().kind)
+                            && begins_expression(self.current().kind)
+                        {
+                            TextRange::empty(self.previous().range.start())
+                        } else {
+                            error.diagnostic.range
+                        };
+                        ParseError::syntax(range, error.diagnostic.message)
+                    })?
+                    .range
+                    .end();
                 Ok(Expr::List(ExprSequence {
                     range: TextRange::new(token.range.start(), end),
                     elts: items,
@@ -1939,6 +2095,7 @@ impl<'src> Parser<'src> {
             let Some(first) = first else {
                 return Err(self.error_here("expected set element"));
             };
+            let first_start = first.range().start();
             elts.push(first);
             if self.at_comprehension_for() {
                 let generators = self.generators()?;
@@ -1956,9 +2113,48 @@ impl<'src> Parser<'src> {
                     break;
                 }
                 elts.push(self.expression(0)?);
+                if self.at_comprehension_for() {
+                    return Err(ParseError::syntax(
+                        TextRange::empty(first_start),
+                        "did you forget parentheses around the comprehension target?",
+                    ));
+                }
             }
         }
-        let end = self.expect(TokenKind::RBrace)?.range.end();
+        let end = self
+            .expect(TokenKind::RBrace)
+            .map_err(|error| {
+                let range = if self.at(TokenKind::Equal) {
+                    if is_dict {
+                        values
+                            .last()
+                            .map(|value| TextRange::empty(value.range().start()))
+                            .unwrap_or(error.diagnostic.range)
+                    } else {
+                        elts.last()
+                            .map(|element| TextRange::empty(element.range().start()))
+                            .unwrap_or(error.diagnostic.range)
+                    }
+                } else if begins_expression(self.previous().kind)
+                    && begins_expression(self.current().kind)
+                {
+                    if is_dict {
+                        values
+                            .last()
+                            .map(|value| TextRange::empty(value.range().start()))
+                            .unwrap_or(error.diagnostic.range)
+                    } else {
+                        elts.last()
+                            .map(|element| TextRange::empty(element.range().start()))
+                            .unwrap_or(error.diagnostic.range)
+                    }
+                } else {
+                    error.diagnostic.range
+                };
+                ParseError::syntax(range, error.diagnostic.message)
+            })?
+            .range
+            .end();
         if is_dict {
             Ok(Expr::Dict(ExprDict { range: TextRange::new(start, end), keys, values }))
         } else {
@@ -1980,14 +2176,18 @@ impl<'src> Parser<'src> {
                 target_first
             };
             self.stop_in = false;
-            let target = mark_store(target)?;
-            self.expect(TokenKind::In)?;
-            let iter_first = self.expression(2)?;
-            let iter = if self.at(TokenKind::Comma) {
-                self.comma_expression(iter_first)?
-            } else {
-                iter_first
+            let target = match mark_store(target) {
+                Ok(target) => target,
+                Err(_error) if self.at(TokenKind::If) => {
+                    return Err(ParseError::syntax(
+                        self.current().range,
+                        "'in' expected after for-loop variables",
+                    ));
+                }
+                Err(error) => return Err(error),
             };
+            self.expect(TokenKind::In)?;
+            let iter = self.expression(2)?;
             let mut ifs = Vec::new();
             while self.eat(TokenKind::If) {
                 ifs.push(self.expression(2)?);
@@ -2044,6 +2244,12 @@ impl<'src> Parser<'src> {
                         if self.eat(TokenKind::DoubleStar) {
                             let starstar = self.previous();
                             let value = self.expression(0)?;
+                            if self.at(TokenKind::Equal) {
+                                return Err(ParseError::syntax(
+                                    TextRange::empty(starstar.range.start()),
+                                    "cannot assign to keyword argument unpacking",
+                                ));
+                            }
                             keywords.push(Keyword {
                                 range: TextRange::new(
                                     starstar.range.start(),
@@ -2055,6 +2261,12 @@ impl<'src> Parser<'src> {
                         } else if self.at(TokenKind::Star) {
                             let star = self.bump();
                             let value = self.expression(0)?;
+                            if self.at(TokenKind::Equal) {
+                                return Err(ParseError::syntax(
+                                    TextRange::empty(star.range.start()),
+                                    "cannot assign to iterable argument unpacking",
+                                ));
+                            }
                             args.push(Expr::Starred(ExprStarred {
                                 range: TextRange::new(star.range.start(), value.range().end()),
                                 value: Box::new(value),
@@ -2063,13 +2275,67 @@ impl<'src> Parser<'src> {
                         } else {
                             let value = self.expression(0)?;
                             if self.at_comprehension_for() {
+                                if !args.is_empty() || !keywords.is_empty() {
+                                    return Err(ParseError::syntax(
+                                        TextRange::empty(value.range().start()),
+                                        "generator expression must be the only argument",
+                                    ));
+                                }
                                 let generators = self.generators()?;
+                                if self.at(TokenKind::Comma) {
+                                    return Err(ParseError::syntax(
+                                        TextRange::empty(value.range().start()),
+                                        "generator expression must be the only argument",
+                                    ));
+                                }
                                 generator_arg = Some((value, generators));
                                 break;
                             }
                             if let Expr::Name(node) = &value {
-                                if self.eat(TokenKind::Equal) {
-                                    let keyword_value = self.expression(0)?;
+                                if self.at(TokenKind::Equal)
+                                    && !self.grouped_expressions.contains(&value.range())
+                                {
+                                    if node.id.as_ref() == "__debug__" {
+                                        return Err(ParseError::syntax(
+                                            node.range,
+                                            "cannot assign to __debug__",
+                                        ));
+                                    }
+                                    if keywords.iter().any(|keyword| {
+                                        keyword.arg.as_deref() == Some(node.id.as_ref())
+                                    }) {
+                                        return Err(ParseError::syntax(
+                                            node.range,
+                                            "keyword argument repeated",
+                                        ));
+                                    }
+                                    self.bump();
+                                    let keyword_value = self.expression(0).map_err(|error| {
+                                        if matches!(
+                                            self.current().kind,
+                                            TokenKind::RPar
+                                                | TokenKind::RSqb
+                                                | TokenKind::RBrace
+                                                | TokenKind::Comma
+                                                | TokenKind::Newline
+                                                | TokenKind::EndMarker
+                                        ) || matches!(
+                                            self.previous().kind,
+                                            TokenKind::RPar
+                                                | TokenKind::RSqb
+                                                | TokenKind::RBrace
+                                                | TokenKind::Comma
+                                                | TokenKind::Newline
+                                                | TokenKind::EndMarker
+                                        ) {
+                                            ParseError::syntax(
+                                                TextRange::empty(value.range().start()),
+                                                error.diagnostic.message,
+                                            )
+                                        } else {
+                                            error
+                                        }
+                                    })?;
                                     keywords.push(Keyword {
                                         range: TextRange::new(
                                             value.range().start(),
@@ -2078,9 +2344,19 @@ impl<'src> Parser<'src> {
                                         arg: Some(node.id.clone()),
                                         value: keyword_value,
                                     });
+                                } else if self.at(TokenKind::Equal) {
+                                    return Err(ParseError::syntax(
+                                        TextRange::empty(value.range().start()),
+                                        "expression cannot contain assignment",
+                                    ));
                                 } else {
                                     args.push(value);
                                 }
+                            } else if self.at(TokenKind::Equal) {
+                                return Err(ParseError::syntax(
+                                    TextRange::empty(value.range().start()),
+                                    "expression cannot contain assignment",
+                                ));
                             } else {
                                 args.push(value);
                             }
@@ -2089,7 +2365,20 @@ impl<'src> Parser<'src> {
                             break;
                         }
                     }
-                    let end = self.expect(TokenKind::RPar)?.range.end();
+                    let end = self
+                        .expect(TokenKind::RPar)
+                        .map_err(|error| {
+                            if matches!(
+                                self.current().kind,
+                                TokenKind::Newline | TokenKind::Dedent | TokenKind::EndMarker
+                            ) {
+                                ParseError::syntax(call_open.range, error.diagnostic.message)
+                            } else {
+                                error
+                            }
+                        })?
+                        .range
+                        .end();
                     if let Some((elt, generators)) = generator_arg {
                         args.push(Expr::GeneratorExp(ExprComprehension {
                             range: TextRange::new(call_open.range.start(), end),
@@ -2216,13 +2505,39 @@ impl<'src> Parser<'src> {
 
     fn parameters_without_parentheses(&mut self) -> Result<Parameters, ParseError> {
         let mut parameters = Parameters::default();
+        let mut seen_default = false;
+        let mut seen_slash = false;
+        let mut seen_kwarg = false;
         let mut keyword_only = false;
         while !self.at(TokenKind::Colon) && !self.at(TokenKind::EndMarker) {
-            if self.eat(TokenKind::Slash) {
+            if self.at(TokenKind::Slash) {
+                let separator = self.bump();
+                if seen_slash
+                    || parameters.args.is_empty()
+                    || keyword_only
+                    || parameters.vararg.is_some()
+                    || seen_kwarg
+                {
+                    return Err(ParseError::syntax(
+                        separator.range,
+                        "invalid positional-only separator",
+                    ));
+                }
+                seen_slash = true;
                 parameters.posonlyargs.append(&mut parameters.args);
-                self.eat(TokenKind::Comma);
+                if !self.eat(TokenKind::Comma) && !self.at(TokenKind::Colon) {
+                    return Err(self.error_here("expected ',' after positional-only separator"));
+                }
                 continue;
-            } else if self.eat(TokenKind::DoubleStar) {
+            } else if self.at(TokenKind::DoubleStar) {
+                let separator = self.bump();
+                if seen_kwarg {
+                    return Err(ParseError::syntax(
+                        separator.range,
+                        "duplicate keyword parameter section",
+                    ));
+                }
+                seen_kwarg = true;
                 let token = self.expect(TokenKind::Name)?;
                 parameters.kwarg = Some(Parameter {
                     range: token.range,
@@ -2231,7 +2546,14 @@ impl<'src> Parser<'src> {
                     default: None,
                     type_comment: None,
                 });
-            } else if self.eat(TokenKind::Star) {
+            } else if self.at(TokenKind::Star) {
+                let separator = self.bump();
+                if seen_kwarg || parameters.vararg.is_some() {
+                    return Err(ParseError::syntax(
+                        separator.range,
+                        "duplicate variadic parameter",
+                    ));
+                }
                 if self.at(TokenKind::Name) {
                     let token = self.bump();
                     parameters.vararg = Some(Parameter {
@@ -2244,11 +2566,29 @@ impl<'src> Parser<'src> {
                 }
                 keyword_only = true;
             } else {
+                if seen_kwarg {
+                    return Err(self.error_here("parameters cannot follow **kwargs"));
+                }
                 let token = self.expect(TokenKind::Name)?;
                 let name = normalize_identifier(self.name_text(token));
-                let default = if self.eat(TokenKind::Equal) {
-                    Some(Box::new(self.expression(0)?))
+                let default = if self.at(TokenKind::Equal) {
+                    let equal = self.bump();
+                    if !keyword_only {
+                        seen_default = true;
+                    }
+                    Some(Box::new(self.expression(0).map_err(|error| {
+                        ParseError::syntax(
+                            TextRange::empty(equal.range.start()),
+                            error.diagnostic.message,
+                        )
+                    })?))
                 } else {
+                    if seen_default && !keyword_only {
+                        return Err(ParseError::syntax(
+                            token.range,
+                            "non-default argument follows default argument",
+                        ));
+                    }
                     None
                 };
                 let parameter = Parameter {
@@ -2798,13 +3138,46 @@ fn normalize_identifier(value: &str) -> Box<str> {
     value.into()
 }
 
+fn begins_expression(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Name
+            | TokenKind::False
+            | TokenKind::None
+            | TokenKind::True
+            | TokenKind::Ellipsis
+            | TokenKind::Int
+            | TokenKind::Float
+            | TokenKind::Complex
+            | TokenKind::String { .. }
+            | TokenKind::FStringStart { .. }
+            | TokenKind::LPar
+            | TokenKind::LSqb
+            | TokenKind::LBrace
+            | TokenKind::Lambda
+            | TokenKind::Yield
+            | TokenKind::Await
+            | TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::Tilde
+            | TokenKind::Not
+            | TokenKind::Star
+    )
+}
+
 fn mark_store(expression: Expr) -> Result<Expr, ParseError> {
     match expression {
         Expr::Name(mut node) => {
+            if node.id.as_ref() == "__debug__" {
+                return Err(ParseError::syntax(node.range, "cannot assign to __debug__"));
+            }
             node.ctx = ExprContext::Store;
             Ok(Expr::Name(node))
         }
         Expr::Attribute(mut node) => {
+            if node.attr.as_ref() == "__debug__" {
+                return Err(ParseError::syntax(node.range, "cannot assign to __debug__"));
+            }
             node.ctx = ExprContext::Store;
             Ok(Expr::Attribute(node))
         }
@@ -2831,13 +3204,43 @@ fn mark_store(expression: Expr) -> Result<Expr, ParseError> {
     }
 }
 
+fn mark_augmented_store(expression: Expr) -> Result<Expr, ParseError> {
+    match expression {
+        Expr::Name(mut node) => {
+            if node.id.as_ref() == "__debug__" {
+                return Err(ParseError::syntax(node.range, "cannot assign to __debug__"));
+            }
+            node.ctx = ExprContext::Store;
+            Ok(Expr::Name(node))
+        }
+        Expr::Attribute(mut node) => {
+            if node.attr.as_ref() == "__debug__" {
+                return Err(ParseError::syntax(node.range, "cannot assign to __debug__"));
+            }
+            node.ctx = ExprContext::Store;
+            Ok(Expr::Attribute(node))
+        }
+        Expr::Subscript(mut node) => {
+            node.ctx = ExprContext::Store;
+            Ok(Expr::Subscript(node))
+        }
+        other => Err(ParseError::syntax(other.range(), "illegal augmented assignment")),
+    }
+}
+
 fn mark_delete(expression: Expr) -> Result<Expr, ParseError> {
     match expression {
         Expr::Name(mut node) => {
+            if node.id.as_ref() == "__debug__" {
+                return Err(ParseError::syntax(node.range, "cannot delete __debug__"));
+            }
             node.ctx = ExprContext::Del;
             Ok(Expr::Name(node))
         }
         Expr::Attribute(mut node) => {
+            if node.attr.as_ref() == "__debug__" {
+                return Err(ParseError::syntax(node.range, "cannot delete __debug__"));
+            }
             node.ctx = ExprContext::Del;
             Ok(Expr::Attribute(node))
         }
