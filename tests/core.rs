@@ -262,6 +262,24 @@ fn validates_nested_statement_contexts() {
 }
 
 #[test]
+fn accepts_valid_generator_and_nonlocal_contexts() {
+    let source = concat!(
+        "def outer():\n",
+        "    del frame\n",
+        "    def generator():\n",
+        "        nonlocal frame\n",
+        "        return (await value for value in values)\n",
+        "    return generator\n",
+        "class C:\n",
+        "    def method(self):\n",
+        "        nonlocal __class__\n",
+        "        __class__ = C\n",
+    );
+    let module = pysyn::parse_module(source).expect("valid binding context source");
+    assert!(validate(&module, ValidateLevel::Semantic).is_empty());
+}
+
+#[test]
 fn handles_raw_strings_and_backslash_continuations() {
     let source =
         concat!("value = r'[\\w!\"\\'&.,?]' \\\n", "other = first + \\\n", "    second\n",);

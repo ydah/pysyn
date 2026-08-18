@@ -165,11 +165,10 @@ impl Validator {
     }
 
     fn has_enclosing_nonlocal_binding(&self, name: &str) -> bool {
-        self.scopes
-            .iter()
-            .rev()
-            .skip(1)
-            .any(|scope| scope.kind.is_function() && scope.all_bindings.contains(name))
+        self.scopes.iter().rev().skip(1).any(|scope| {
+            (scope.kind.is_function() && scope.all_bindings.contains(name))
+                || (scope.kind == ScopeKind::Class && name == "__class__")
+        })
     }
 
     fn validate_block(&mut self, body: &[Stmt]) {
@@ -302,6 +301,7 @@ impl Validator {
             Stmt::Delete(node) => {
                 for target in &node.targets {
                     self.validate_expr(target);
+                    self.record_target_bindings(target);
                 }
             }
             Stmt::Assign(node) => {
@@ -472,6 +472,7 @@ impl Validator {
     fn validate_expr(&mut self, expr: &Expr) {
         struct ExprValidator<'validator> {
             validator: &'validator mut Validator,
+            generator_depth: usize,
         }
 
         impl<'tree, 'validator> Visitor<'tree> for ExprValidator<'validator> {
@@ -486,7 +487,9 @@ impl Validator {
                         walk_expr(self, expr);
                     }
                     Expr::Await(node) => {
-                        self.validator.validate_await(node.range);
+                        if self.generator_depth == 0 {
+                            self.validator.validate_await(node.range);
+                        }
                         walk_expr(self, expr);
                     }
                     Expr::Yield(node) => {
@@ -505,12 +508,17 @@ impl Validator {
                         self.validator.validate_expr(&node.body);
                         self.validator.pop_scope();
                     }
+                    Expr::GeneratorExp(_) => {
+                        self.generator_depth += 1;
+                        walk_expr(self, expr);
+                        self.generator_depth = self.generator_depth.saturating_sub(1);
+                    }
                     _ => walk_expr(self, expr),
                 }
             }
         }
 
-        let mut validator = ExprValidator { validator: self };
+        let mut validator = ExprValidator { validator: self, generator_depth: 0 };
         validator.visit_expr(expr);
     }
 
@@ -784,6 +792,7 @@ fn collect_statement_bindings(statement: &Stmt, bindings: &mut HashSet<String>) 
         }
         Stmt::Delete(node) => {
             for target in &node.targets {
+                collect_target_bindings(target, bindings);
                 collect_expr_bindings(target, bindings);
             }
         }
