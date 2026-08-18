@@ -2,11 +2,22 @@
 
 use std::env;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+fn pysyn_binary() -> PathBuf {
+    if let Some(path) = env::var_os("CARGO_BIN_EXE_pysyn") {
+        return path.into();
+    }
+    let target_dir = env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+    let executable = if cfg!(windows) { "pysyn.exe" } else { "pysyn" };
+    target_dir.join("debug").join(executable)
+}
+
 fn check_rejects(source: &str) -> bool {
-    let binary = env::var_os("CARGO_BIN_EXE_pysyn").expect("pysyn binary path");
-    let mut child = Command::new(binary)
+    let mut child = Command::new(pysyn_binary())
         .args(["check", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
