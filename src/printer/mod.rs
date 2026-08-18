@@ -200,6 +200,8 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             output.push_str(&repr_string(&node.name));
             output.push_str(", args=");
             dump_parameters(&node.args, options, level, output);
+            output.push_str(", type_params=");
+            dump_type_params(&node.type_params, options, level, output);
             output.push_str(", body=[");
             for (index, child) in node.body.iter().enumerate() {
                 if index > 0 {
@@ -225,6 +227,8 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
         Stmt::ClassDef(node) => {
             output.push_str("ClassDef(name=");
             output.push_str(&repr_string(&node.name));
+            output.push_str(", type_params=");
+            dump_type_params(&node.type_params, options, level, output);
             output.push_str(", body=[");
             for (index, child) in node.body.iter().enumerate() {
                 if index > 0 {
@@ -410,7 +414,9 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
         Stmt::TypeAlias(node) => {
             output.push_str("TypeAlias(name=");
             dump_expr(&node.name, options, level, output);
-            output.push_str(", type_params=[], value=");
+            output.push_str(", type_params=");
+            dump_type_params(&node.type_params, options, level, output);
+            output.push_str(", value=");
             dump_expr(&node.value, options, level, output);
             output.push(')');
         }
@@ -463,6 +469,45 @@ fn dump_parameters(
     output.push_str("])");
 }
 
+fn dump_type_params(
+    type_params: &[TypeParam],
+    options: &DumpOptions,
+    level: usize,
+    output: &mut String,
+) {
+    output.push('[');
+    for (index, type_param) in type_params.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        let (name, data) = match type_param {
+            TypeParam::TypeVar(data)
+            | TypeParam::ParamSpec(data)
+            | TypeParam::TypeVarTuple(data) => (type_param, data),
+        };
+        output.push_str(match name {
+            TypeParam::TypeVar(_) => "TypeVar(name=",
+            TypeParam::ParamSpec(_) => "ParamSpec(name=",
+            TypeParam::TypeVarTuple(_) => "TypeVarTuple(name=",
+        });
+        output.push_str(&repr_string(&data.name));
+        output.push_str(", bound=");
+        if let Some(bound) = &data.bound {
+            dump_expr(bound, options, level, output);
+        } else {
+            output.push_str("None");
+        }
+        output.push_str(", default_value=");
+        if let Some(default) = &data.default {
+            dump_expr(default, options, level, output);
+        } else {
+            output.push_str("None");
+        }
+        output.push(')');
+    }
+    output.push(']');
+}
+
 fn dump_parameter_list(
     parameters: &[Parameter],
     options: &DumpOptions,
@@ -498,7 +543,13 @@ fn dump_pattern(pattern: &Pattern, options: &DumpOptions, level: usize, output: 
             } else {
                 output.push_str("None");
             }
-            output.push_str(", pattern=None)");
+            output.push_str(", pattern=");
+            if let Some(pattern) = &node.pattern {
+                dump_pattern(pattern, options, level, output);
+            } else {
+                output.push_str("None");
+            }
+            output.push(')');
         }
         Pattern::Singleton(node) => {
             output.push_str("MatchSingleton(value=");
@@ -539,8 +590,55 @@ fn dump_pattern(pattern: &Pattern, options: &DumpOptions, level: usize, output: 
             }
             output.push(')');
         }
-        Pattern::Mapping(_) => output.push_str("MatchMapping()"),
-        Pattern::Class(_) => output.push_str("MatchClass()"),
+        Pattern::Mapping(node) => {
+            output.push_str("MatchMapping(keys=[");
+            for (index, key) in node.keys.iter().enumerate() {
+                if index > 0 {
+                    output.push_str(", ");
+                }
+                dump_expr(key, options, level, output);
+            }
+            output.push_str("], patterns=[");
+            for (index, pattern) in node.patterns.iter().enumerate() {
+                if index > 0 {
+                    output.push_str(", ");
+                }
+                dump_pattern(pattern, options, level, output);
+            }
+            output.push_str(", rest=");
+            if let Some(rest) = &node.rest {
+                output.push_str(&repr_string(rest));
+            } else {
+                output.push_str("None");
+            }
+            output.push(')');
+        }
+        Pattern::Class(node) => {
+            output.push_str("MatchClass(cls=");
+            dump_expr(&node.cls, options, level, output);
+            output.push_str(", patterns=[");
+            for (index, pattern) in node.patterns.iter().enumerate() {
+                if index > 0 {
+                    output.push_str(", ");
+                }
+                dump_pattern(pattern, options, level, output);
+            }
+            output.push_str("], kwd_attrs=[");
+            for (index, attr) in node.kwd_attrs.iter().enumerate() {
+                if index > 0 {
+                    output.push_str(", ");
+                }
+                output.push_str(&repr_string(attr));
+            }
+            output.push_str("], kwd_patterns=[");
+            for (index, pattern) in node.kwd_patterns.iter().enumerate() {
+                if index > 0 {
+                    output.push_str(", ");
+                }
+                dump_pattern(pattern, options, level, output);
+            }
+            output.push_str("])");
+        }
         Pattern::Invalid(_) => output.push_str("Invalid()"),
     }
 }
@@ -1104,9 +1202,59 @@ impl Unparser {
             Stmt::FunctionDef(node) | Stmt::AsyncFunctionDef(node) => {
                 let prefix =
                     if matches!(statement, Stmt::AsyncFunctionDef(_)) { "async " } else { "" };
-                self.block_header(&format!("{prefix}def {}():", node.name), &node.body);
+                let returns = node
+                    .returns
+                    .as_ref()
+                    .map(|value| format!(" -> {}", self.expression(value)))
+                    .unwrap_or_default();
+                self.block_header(
+                    &format!(
+                        "{prefix}def {}{}({}){}:",
+                        node.name,
+                        self.type_parameters(&node.type_params),
+                        self.parameters(&node.args),
+                        returns
+                    ),
+                    &node.body,
+                );
             }
-            Stmt::ClassDef(node) => self.block_header(&format!("class {}:", node.name), &node.body),
+            Stmt::ClassDef(node) => {
+                let bases = node
+                    .bases
+                    .iter()
+                    .map(|base| self.expression(base))
+                    .chain(node.keywords.iter().map(|keyword| {
+                        keyword
+                            .arg
+                            .as_ref()
+                            .map(|arg| format!("{arg}={}", self.expression(&keyword.value)))
+                            .unwrap_or_else(|| format!("**{}", self.expression(&keyword.value)))
+                    }))
+                    .collect::<Vec<_>>();
+                let suffix = if bases.is_empty() {
+                    String::new()
+                } else {
+                    format!("({})", bases.join(", "))
+                };
+                self.block_header(
+                    &format!(
+                        "class {}{}{}:",
+                        node.name,
+                        self.type_parameters(&node.type_params),
+                        suffix
+                    ),
+                    &node.body,
+                );
+            }
+            Stmt::TypeAlias(node) => {
+                let name = self.expression(&node.name);
+                self.line(&format!(
+                    "type {}{} = {}",
+                    name,
+                    self.type_parameters(&node.type_params),
+                    self.expression(&node.value)
+                ));
+            }
             _ => self.line("pass"),
         }
     }
@@ -1122,6 +1270,64 @@ impl Unparser {
         self.output.push_str(&"    ".repeat(self.indent));
         self.output.push_str(value);
         self.output.push('\n');
+    }
+    fn type_parameters(&self, type_params: &[TypeParam]) -> String {
+        if type_params.is_empty() {
+            return String::new();
+        }
+        let values = type_params
+            .iter()
+            .map(|type_param| {
+                let (prefix, data) = match type_param {
+                    TypeParam::TypeVar(data) => ("", data),
+                    TypeParam::ParamSpec(data) => ("**", data),
+                    TypeParam::TypeVarTuple(data) => ("*", data),
+                };
+                let bound = data
+                    .bound
+                    .as_ref()
+                    .map(|value| format!(": {}", self.expression(value)))
+                    .unwrap_or_default();
+                let default = data
+                    .default
+                    .as_ref()
+                    .map(|value| format!(" = {}", self.expression(value)))
+                    .unwrap_or_default();
+                format!("{prefix}{}{bound}{default}", data.name)
+            })
+            .collect::<Vec<_>>();
+        format!("[{}]", values.join(", "))
+    }
+    fn parameters(&self, parameters: &Parameters) -> String {
+        let mut values = Vec::new();
+        values.extend(parameters.posonlyargs.iter().map(|parameter| self.parameter(parameter)));
+        if !parameters.posonlyargs.is_empty() {
+            values.push("/".into());
+        }
+        values.extend(parameters.args.iter().map(|parameter| self.parameter(parameter)));
+        if let Some(vararg) = &parameters.vararg {
+            values.push(format!("*{}", self.parameter(vararg)));
+        } else if !parameters.kwonlyargs.is_empty() {
+            values.push("*".into());
+        }
+        values.extend(parameters.kwonlyargs.iter().map(|parameter| self.parameter(parameter)));
+        if let Some(kwarg) = &parameters.kwarg {
+            values.push(format!("**{}", self.parameter(kwarg)));
+        }
+        values.join(", ")
+    }
+    fn parameter(&self, parameter: &Parameter) -> String {
+        let annotation = parameter
+            .annotation
+            .as_ref()
+            .map(|value| format!(": {}", self.expression(value)))
+            .unwrap_or_default();
+        let default = parameter
+            .default
+            .as_ref()
+            .map(|value| format!(" = {}", self.expression(value)))
+            .unwrap_or_default();
+        format!("{}{annotation}{default}", parameter.name)
     }
     fn expression(&self, expression: &Expr) -> String {
         match expression {

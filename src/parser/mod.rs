@@ -134,6 +134,13 @@ struct Parser<'src> {
     stop_pattern_guard: bool,
 }
 
+#[derive(Copy, Clone)]
+enum TypeParamKind {
+    TypeVar,
+    ParamSpec,
+    TypeVarTuple,
+}
+
 impl<'src> Parser<'src> {
     fn new(src: &'src str, options: ParseOptions) -> Self {
         let mut tokens = Vec::new();
@@ -330,25 +337,14 @@ impl<'src> Parser<'src> {
             id: normalize_identifier(self.name_text(name_token)),
             ctx: ExprContext::Store,
         });
-        if self.eat(TokenKind::LSqb) {
-            let mut depth = 1u32;
-            while depth > 0 && !self.at(TokenKind::EndMarker) {
-                if self.eat(TokenKind::LSqb) {
-                    depth += 1;
-                } else if self.eat(TokenKind::RSqb) {
-                    depth = depth.saturating_sub(1);
-                } else {
-                    self.bump();
-                }
-            }
-        }
+        let type_params = self.type_parameters()?;
         self.expect(TokenKind::Equal)?;
         let value = Box::new(self.expression(0)?);
         self.consume_line_end();
         Ok(Stmt::TypeAlias(StmtTypeAlias {
             range: TextRange::new(start, value.range().end()),
             name: Box::new(name),
-            type_params: Vec::new(),
+            type_params,
             value,
         }))
     }
@@ -361,7 +357,7 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::Def)?;
         let name_token = self.expect(TokenKind::Name)?;
         let name = normalize_identifier(self.name_text(name_token));
-        self.skip_type_parameters();
+        let type_params = self.type_parameters()?;
         let args = self.parameters()?;
         let returns =
             if self.eat(TokenKind::Arrow) { Some(Box::new(self.expression(0)?)) } else { None };
@@ -375,7 +371,7 @@ impl<'src> Parser<'src> {
             range,
             name,
             decorator_list: Vec::new(),
-            type_params: Vec::new(),
+            type_params,
             args,
             returns,
             body,
@@ -392,7 +388,7 @@ impl<'src> Parser<'src> {
         let start = self.expect(TokenKind::Class)?.range.start();
         let name_token = self.expect(TokenKind::Name)?;
         let name = normalize_identifier(self.name_text(name_token));
-        self.skip_type_parameters();
+        let type_params = self.type_parameters()?;
         let mut bases = Vec::new();
         let mut keywords = Vec::new();
         if self.eat(TokenKind::LPar) {
@@ -441,7 +437,7 @@ impl<'src> Parser<'src> {
             bases,
             keywords,
             decorator_list: Vec::new(),
-            type_params: Vec::new(),
+            type_params,
             body,
         })))
     }
@@ -1045,20 +1041,52 @@ impl<'src> Parser<'src> {
         }
     }
 
-    fn skip_type_parameters(&mut self) {
+    fn type_parameters(&mut self) -> Result<Vec<TypeParam>, ParseError> {
         if !self.eat(TokenKind::LSqb) {
-            return;
+            return Ok(Vec::new());
         }
-        let mut depth = 1u32;
-        while depth > 0 && !self.at(TokenKind::EndMarker) {
-            if self.eat(TokenKind::LSqb) {
-                depth += 1;
-            } else if self.eat(TokenKind::RSqb) {
-                depth = depth.saturating_sub(1);
+        if !self.options.version.supports(PythonVersion::Py312) {
+            self.push_error(Diagnostic::unsupported(
+                self.previous().range,
+                "type parameter lists require Python 3.12 or newer",
+            ));
+        }
+        let mut params = Vec::new();
+        while !self.at(TokenKind::RSqb) && !self.at(TokenKind::EndMarker) {
+            let start = self.current().range.start();
+            let kind = if self.eat(TokenKind::DoubleStar) {
+                TypeParamKind::ParamSpec
+            } else if self.eat(TokenKind::Star) {
+                TypeParamKind::TypeVarTuple
             } else {
-                self.bump();
+                TypeParamKind::TypeVar
+            };
+            let name_token = self.expect(TokenKind::Name)?;
+            let bound = if self.eat(TokenKind::Colon) { Some(self.expression(0)?) } else { None };
+            let default = if self.eat(TokenKind::Equal) { Some(self.expression(0)?) } else { None };
+            let end = default
+                .as_ref()
+                .map(Ranged::range)
+                .or_else(|| bound.as_ref().map(Ranged::range))
+                .unwrap_or(name_token.range)
+                .end();
+            let data = TypeParamData {
+                range: TextRange::new(start, end),
+                name: normalize_identifier(self.name_text(name_token)),
+                bound,
+                default,
+            };
+            params.push(match kind {
+                TypeParamKind::TypeVar => TypeParam::TypeVar(data),
+                TypeParamKind::ParamSpec => TypeParam::ParamSpec(data),
+                TypeParamKind::TypeVarTuple => TypeParam::TypeVarTuple(data),
+            });
+            if !self.eat(TokenKind::Comma) {
+                break;
             }
         }
+        self.expect(TokenKind::RSqb)?;
+        Ok(params)
     }
 
     fn comma_expression(&mut self, first: Expr) -> Result<Expr, ParseError> {
@@ -1551,6 +1579,9 @@ impl<'src> Parser<'src> {
                                 let generators = self.generators()?;
                                 generator_arg = Some((value, generators));
                                 break;
+                            }
+                            if self.stop_pattern_guard && self.eat(TokenKind::As) {
+                                self.expect(TokenKind::Name)?;
                             }
                             if let Expr::Name(node) = &value {
                                 if self.eat(TokenKind::Equal) {
@@ -2100,10 +2131,48 @@ fn pattern_from_expr(expression: Expr) -> Pattern {
         Expr::BooleanLiteral(_) | Expr::NoneLiteral(_) => {
             Pattern::Singleton(PatternSingleton { range, value: expression })
         }
+        Expr::Starred(node) => {
+            let name = match *node.value {
+                Expr::Name(name) => Some(name.id),
+                _ => None,
+            };
+            Pattern::Star(PatternStar { range, name })
+        }
         Expr::List(node) | Expr::Tuple(node) => Pattern::Sequence(PatternSequence {
             range,
             patterns: node.elts.into_iter().map(pattern_from_expr).collect(),
         }),
+        Expr::Dict(node) => {
+            let mut keys = Vec::new();
+            let mut patterns = Vec::new();
+            let mut rest = None;
+            for (key, value) in node.keys.into_iter().zip(node.values) {
+                if let Some(key) = key {
+                    keys.push(key);
+                    patterns.push(pattern_from_expr(value));
+                } else if let Expr::Name(name) = value {
+                    rest = Some(name.id);
+                }
+            }
+            Pattern::Mapping(PatternMapping { range, keys, patterns, rest })
+        }
+        Expr::Call(node) => {
+            let mut kwd_attrs = Vec::new();
+            let mut kwd_patterns = Vec::new();
+            for keyword in node.keywords {
+                if let Some(arg) = keyword.arg {
+                    kwd_attrs.push(arg);
+                    kwd_patterns.push(pattern_from_expr(keyword.value));
+                }
+            }
+            Pattern::Class(PatternClass {
+                range,
+                cls: *node.func,
+                patterns: node.args.into_iter().map(pattern_from_expr).collect(),
+                kwd_attrs,
+                kwd_patterns,
+            })
+        }
         Expr::BinOp(node) if node.op == BinaryOperator::BitOr => {
             let patterns = vec![pattern_from_expr(*node.left), pattern_from_expr(*node.right)];
             Pattern::Or(PatternOr { range, patterns })

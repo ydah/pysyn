@@ -2,7 +2,7 @@
 
 #![allow(missing_docs)]
 
-use crate::ast::{AnyNodeRef, Expr, ModModule, Ranged, Stmt};
+use crate::ast::{AnyNodeRef, Expr, ModModule, Pattern, Ranged, Stmt};
 
 pub trait Visitor<'a> {
     fn visit_stmt(&mut self, node: &'a Stmt) {
@@ -10,6 +10,9 @@ pub trait Visitor<'a> {
     }
     fn visit_expr(&mut self, node: &'a Expr) {
         walk_expr(self, node);
+    }
+    fn visit_pattern(&mut self, node: &'a Pattern) {
+        walk_pattern(self, node);
     }
 }
 
@@ -156,6 +159,7 @@ pub fn walk_stmt<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, node: &'a Stmt) {
         Stmt::Match(stmt) => {
             visitor.visit_expr(&stmt.subject);
             for case in &stmt.cases {
+                visitor.visit_pattern(&case.pattern);
                 if let Some(guard) = &case.guard {
                     visitor.visit_expr(guard);
                 }
@@ -168,6 +172,46 @@ pub fn walk_stmt<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, node: &'a Stmt) {
             visitor.visit_expr(&stmt.name);
             visitor.visit_expr(&stmt.value);
         }
+    }
+}
+
+pub fn walk_pattern<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, node: &'a Pattern) {
+    match node {
+        Pattern::Value(node) => visitor.visit_expr(&node.value),
+        Pattern::Singleton(node) => visitor.visit_expr(&node.value),
+        Pattern::Sequence(node) => {
+            for pattern in &node.patterns {
+                visitor.visit_pattern(pattern);
+            }
+        }
+        Pattern::Mapping(node) => {
+            for key in &node.keys {
+                visitor.visit_expr(key);
+            }
+            for pattern in &node.patterns {
+                visitor.visit_pattern(pattern);
+            }
+        }
+        Pattern::Class(node) => {
+            visitor.visit_expr(&node.cls);
+            for pattern in &node.patterns {
+                visitor.visit_pattern(pattern);
+            }
+            for pattern in &node.kwd_patterns {
+                visitor.visit_pattern(pattern);
+            }
+        }
+        Pattern::As(node) => {
+            if let Some(pattern) = &node.pattern {
+                visitor.visit_pattern(pattern);
+            }
+        }
+        Pattern::Or(node) => {
+            for pattern in &node.patterns {
+                visitor.visit_pattern(pattern);
+            }
+        }
+        Pattern::Star(_) | Pattern::Invalid(_) => {}
     }
 }
 

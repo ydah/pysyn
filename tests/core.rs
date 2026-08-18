@@ -108,6 +108,43 @@ fn parses_multiline_and_delimited_constructs() {
 }
 
 #[test]
+fn parses_pep695_type_parameters() {
+    let source = concat!(
+        "def identity[T: Base = int, *Ts, **P](value: T) -> T:\n",
+        "    return value\n",
+        "class Box[T](Base):\n    pass\n",
+        "type Alias[T = int] = list[T]\n",
+    );
+    let module = pysyn::parse_module(source).expect("valid type parameter source");
+    let Stmt::FunctionDef(function) = &module.body[0] else { panic!("expected function") };
+    assert_eq!(function.type_params.len(), 3);
+    let Stmt::ClassDef(class) = &module.body[1] else { panic!("expected class") };
+    assert_eq!(class.type_params.len(), 1);
+    let Stmt::TypeAlias(alias) = &module.body[2] else { panic!("expected type alias") };
+    assert_eq!(alias.type_params.len(), 1);
+    let unparsed = pysyn::printer::unparse(&module);
+    assert!(unparsed.contains("def identity[T: Base = int, *Ts, **P](value: T) -> T:"));
+    assert!(unparsed.contains("type Alias[T = int] = list[T]"));
+}
+
+#[test]
+fn builds_match_pattern_variants() {
+    let source = concat!(
+        "match value:\n",
+        "    case {\"kind\": item, **rest}:\n        pass\n",
+        "    case Point(x, y as point_y):\n        pass\n",
+        "    case [*items]:\n        pass\n",
+        "    case 0 | 1:\n        pass\n",
+    );
+    let module = pysyn::parse_module(source).expect("valid pattern source");
+    let Stmt::Match(statement) = &module.body[0] else { panic!("expected match") };
+    assert!(matches!(statement.cases[0].pattern, pysyn::ast::Pattern::Mapping(_)));
+    assert!(matches!(statement.cases[1].pattern, pysyn::ast::Pattern::Class(_)));
+    assert!(matches!(statement.cases[2].pattern, pysyn::ast::Pattern::Sequence(_)));
+    assert!(matches!(statement.cases[3].pattern, pysyn::ast::Pattern::Or(_)));
+}
+
+#[test]
 fn handles_raw_strings_and_backslash_continuations() {
     let source =
         concat!("value = r'[\\w!\"\\'&.,?]' \\\n", "other = first + \\\n", "    second\n",);
