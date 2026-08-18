@@ -43,7 +43,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - run: RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps
+      - run: RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps --all-features
 
   differential:
     name: differential / Python ${{ matrix.python-version }}
@@ -68,6 +68,7 @@ jobs:
           --pysyn target/debug/pysyn
           --mode all
           --include-fstrings
+          --strict-ast
           --report differential-${{ matrix.python-version }}.json
       - uses: actions/upload-artifact@v4
         if: always()
@@ -96,8 +97,25 @@ jobs:
           name: coverage
           path: lcov.info
 
+  bench:
+    name: Criterion benchmarks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: actions/cache@v4
+        with:
+          path: target/criterion
+          key: criterion-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            criterion-${{ runner.os }}-
+      - run: cargo bench --bench parser -- --noplot
+
   fuzz:
-    name: Python fuzz smoke (scheduled)
+    name: Rust fuzz and Python smoke (scheduled)
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:
@@ -107,7 +125,13 @@ jobs:
           python-version: '3.13'
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: stable
+          toolchain: nightly
+          components: rust-src
+      - run: cargo install cargo-fuzz --locked
+      - name: Run arbitrary-byte cargo-fuzz target
+        run: cargo fuzz run parse_bytes -- -max_total_time=300
+      - name: Run structured-input cargo-fuzz target
+        run: cargo fuzz run parse_structured -- -max_total_time=300
       - run: cargo build --quiet --release --bin pysyn
       - name: Run deterministic Python parser fuzz smoke test
         run: >-

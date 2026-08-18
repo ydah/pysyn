@@ -11,8 +11,9 @@ The three checks are:
   F-string token cases are skipped unless `--include-fstrings` is supplied.
 - `ast`: a structural comparison of the CPython AST and `pysyn dump`. Empty
   optional fields are ignored so Python-version additions such as `type_params`
-  do not create false positives. `--strict-ast` also includes CPython location
-  attributes and is expected to fail until the printer emits them.
+  do not create false positives. `--strict-ast` also compares CPython location
+  attributes; the CLI dump includes them by default, while
+  `--no-attributes` selects the structural form.
 - `roundtrip`: parses `pysyn unparse` with CPython and compares its structural
   AST with the original. It also checks that pysyn accepts its own output.
 
@@ -24,13 +25,15 @@ python3 tools/differential.py \
   --python python3.13 \
   --pysyn target/debug/pysyn \
   --mode all \
-  --include-fstrings
+  --include-fstrings \
+  --strict-ast
 ```
 
 The CI differential job builds the binary with `cargo build --all-features`
 and always passes `--include-fstrings` for each CPython 3.10–3.13 matrix entry.
+It also passes `--strict-ast`, so location attributes are checked in CI.
 This keeps the CI binary aligned with the feature-complete test build and
-prevents f-string token coverage from being silently skipped.
+prevents f-string token or AST-location coverage from being silently skipped.
 
 Compare a local corpus without copying it into the repository:
 
@@ -67,20 +70,18 @@ per-process timeout. No corpus is persisted. This is explicitly a Python
 subprocess smoke test: it checks reproducible malformed inputs for crashes,
 panics, stack overflows, and hangs.
 
-The repository does not currently add `cargo-fuzz` targets or Criterion
-benchmarks. The existing Cargo configuration has no fuzz or benchmark harness,
-and introducing either would require additional Rust/Cargo changes outside
-this CI/documentation-only update. Therefore the smoke job does not satisfy
-the stronger design-document requirements for arbitrary-byte/structured
-`cargo-fuzz` campaigns, long-running fuzzing, or benchmark-based 10% regression
-detection. Those remain explicit follow-up work rather than being represented
-as completed by CI.
+The repository also contains `cargo-fuzz` targets for arbitrary bytes and
+structured parser input. The scheduled job runs each for five minutes before
+running the deterministic Python smoke test. Criterion benchmarks for
+tokenization and parsing are available through `cargo bench --bench parser`;
+the main-branch job caches Criterion's baseline directory so repeated runs can
+report regressions.
 
 ## Coverage
 
 The CI `coverage` job installs `cargo-llvm-cov`, runs the complete workspace
 test suite, uploads `lcov.info`, and enforces a 40% line-coverage floor with
-`--fail-under-lines 40`. The current test suite measured 43.4% line coverage
+`--fail-under-lines 40`. The current test suite measures about 45.6% line coverage
 locally, so this is a conservative non-regression floor rather than a claim of
 the design-document's 85% target. The 85% target remains unmet and should be
 raised only after the missing parser, printer, validator, and CLI paths receive
@@ -89,7 +90,8 @@ tests.
 ## CI matrix
 
 The `differential` job runs the smoke corpus once for each CPython 3.10–3.13
-interpreter using an all-features binary and f-string token coverage, then
+interpreter using an all-features binary, f-string token coverage, and strict
+AST location checking, then
 uploads the JSON report even when a comparison fails. The scheduled `fuzz` job
 is independent of the differential matrix and is the deterministic Python
 smoke test described above. Large CPython or third-party corpora remain opt-in

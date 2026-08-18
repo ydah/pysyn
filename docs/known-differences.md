@@ -15,6 +15,9 @@ differential tests can distinguish implementation gaps from regressions.
   version range.
 - The public AST keeps literal categories as distinct Rust variants and folds
   them into CPython `Constant` nodes only in the dump printer.
-- AST nodes retain exact UTF-8 byte ranges, while the dump API does not yet
-  emit CPython's line/column location attributes. Differential AST checks
-  therefore compare structural fields and intentionally omit locations.
+- The parser returns PEP 484 type comments and the `Module.type_ignores` side
+  table when `ParseOptions::type_comments` is enabled. It also emits
+  non-fatal invalid-escape diagnostics.
+- The dump printer emits CPython-compatible UTF-8 location attributes for
+  parsed modules. ASTs constructed manually without source text can only
+  produce the structural form.

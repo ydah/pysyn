@@ -46,7 +46,11 @@ def compare_ast(case: Case, command: str, pysyn: str, timeout: float, strict: bo
         return Finding(case.name, "ast", "reference-syntax", json.dumps(expected, ensure_ascii=False))
     argument = str(case.path) if case.path is not None else "-"
     stdin = "" if case.path is not None else case.source
-    stdout, stderr, status = run_process([pysyn, "dump", argument], stdin, timeout)
+    dump_command = [pysyn, "dump"]
+    if not strict:
+        dump_command.append("--no-attributes")
+    dump_command.append(argument)
+    stdout, stderr, status = run_process(dump_command, stdin, timeout)
     if status != 0:
         return Finding(case.name, "ast", "pysyn-error", str(status))
     try:

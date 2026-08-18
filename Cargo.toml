@@ -23,9 +23,16 @@ encoding_rs = { version = "0.8", optional = true }
 unicode_names2 = "1"
 unicode-normalization = { version = "0.1", optional = true }
 
+[dev-dependencies]
+criterion = "0.5.1"
+
 [[bin]]
 name = "pysyn"
 path = "src/bin/pysyn.rs"
+
+[[bench]]
+name = "parser"
+harness = false
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -1,8 +1,7 @@
 """AST normalization used by the differential harness.
 
-The Rust printer currently emits a CPython-shaped expression rather than a
-location-complete ``ast.dump``.  We parse both dumps as data and remove only
-empty/default fields.  Non-empty fields remain subject to comparison.
+We parse both dumps as data and remove only empty/default fields.  Non-empty
+fields, including locations in strict mode, remain subject to comparison.
 """
 
 from __future__ import annotations
