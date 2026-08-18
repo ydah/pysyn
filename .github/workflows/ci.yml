@@ -60,13 +60,14 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-      - run: cargo build --quiet --bin pysyn
-      - name: Run token, AST, and round-trip comparisons
+      - run: cargo build --quiet --all-features --bin pysyn
+      - name: Run token, AST, and round-trip comparisons with f-strings
         run: >-
           python tools/differential.py
           --python python
           --pysyn target/debug/pysyn
           --mode all
+          --include-fstrings
           --report differential-${{ matrix.python-version }}.json
       - uses: actions/upload-artifact@v4
         if: always()
@@ -85,9 +86,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
-      - name: Collect coverage report
+      - name: Collect coverage report and enforce regression floor
         run: >-
           cargo llvm-cov --all-features --workspace
+          --fail-under-lines 40
           --lcov --output-path lcov.info
       - uses: actions/upload-artifact@v4
         with:
@@ -95,6 +97,7 @@ jobs:
           path: lcov.info
 
   fuzz:
+    name: Python fuzz smoke (scheduled)
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:
@@ -106,7 +109,7 @@ jobs:
         with:
           toolchain: stable
       - run: cargo build --quiet --release --bin pysyn
-      - name: Run deterministic parser fuzz smoke test
+      - name: Run deterministic Python parser fuzz smoke test
         run: >-
           python tools/fuzz_smoke.py
           --pysyn target/release/pysyn
