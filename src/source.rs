@@ -204,7 +204,7 @@ impl LineIndex {
 
     /// Converts an offset to UTF-16 code-unit columns.
     pub fn line_col_utf16(&self, src: &str, offset: TextSize) -> LineCol {
-        let offset = offset.as_usize().min(src.len());
+        let offset = clamp_to_char_boundary(src, offset);
         let (line, start) = self.line_start(TextSize::new(offset as u32));
         LineCol {
             line: line as u32 + 1,
@@ -214,13 +214,21 @@ impl LineIndex {
 
     /// Converts an offset to Unicode scalar-value columns.
     pub fn line_col_chars(&self, src: &str, offset: TextSize) -> LineCol {
-        let offset = offset.as_usize().min(src.len());
+        let offset = clamp_to_char_boundary(src, offset);
         let (line, start) = self.line_start(TextSize::new(offset as u32));
         LineCol {
             line: line as u32 + 1,
             column: src[start.as_usize()..offset].chars().count() as u32,
         }
     }
+}
+
+fn clamp_to_char_boundary(src: &str, offset: TextSize) -> usize {
+    let mut offset = offset.as_usize().min(src.len());
+    while offset > 0 && !src.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
 }
 
 /// A named source file and its line index.
@@ -332,8 +340,11 @@ fn cookie_in_line(line: &[u8]) -> Option<String> {
         content = &content[1..];
     }
     let content = content.strip_prefix(b"#")?;
-    let position = content.windows(6).position(|window| window.eq_ignore_ascii_case(b"coding"))?;
-    let tail = &content[position + 6..];
+    let tail = content.windows(6).enumerate().find_map(|(position, window)| {
+        (window == b"coding")
+            .then_some(&content[position + 6..])
+            .filter(|tail| tail.starts_with(b":") || tail.starts_with(b"="))
+    })?;
     let tail = tail.strip_prefix(b":").or_else(|| tail.strip_prefix(b"="))?;
     let name = tail
         .iter()
@@ -469,6 +480,25 @@ mod tests {
             unicode_index.line_col_chars(unicode, TextSize::new(3)),
             LineCol { line: 1, column: 1 }
         );
+    }
+
+    #[test]
+    fn line_columns_clamp_offsets_inside_utf8_characters() {
+        let src = "😀é";
+        let index = LineIndex::new(src);
+        let offset_inside_e = TextSize::new(5);
+
+        assert_eq!(index.line_col_utf16(src, offset_inside_e), LineCol { line: 1, column: 2 });
+        assert_eq!(index.line_col_chars(src, offset_inside_e), LineCol { line: 1, column: 1 });
+    }
+
+    #[test]
+    fn coding_cookie_matches_cpython_case_sensitivity_and_spacing() {
+        let expected = || Ok(SourceEncoding::Declared("latin-1".into()));
+        assert_eq!(detect_encoding(b"# coding: latin-1\n"), expected());
+        assert_eq!(detect_encoding(b"# foo coding: latin-1\n"), expected());
+        assert_eq!(detect_encoding(b"# nocoding: latin-1\n"), expected());
+        assert_eq!(detect_encoding(b"# CODING=latin-1\n"), Ok(SourceEncoding::Utf8));
     }
 
     #[test]
