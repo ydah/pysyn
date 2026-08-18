@@ -31,6 +31,8 @@ pub enum DiagnosticCode {
     TooDeep,
     /// Source encoding error.
     Encoding,
+    /// Invalid string escape sequence.
+    InvalidEscape,
 }
 
 impl DiagnosticCode {
@@ -44,6 +46,7 @@ impl DiagnosticCode {
             Self::UnsupportedSyntax => "PSY0901",
             Self::TooDeep => "PSY0302",
             Self::Encoding => "PSY0102",
+            Self::InvalidEscape => "PSY0103",
         }
     }
 }

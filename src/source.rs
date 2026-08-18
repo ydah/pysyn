@@ -315,6 +315,9 @@ pub fn detected_encoding_name(bytes: &[u8]) -> Result<Box<str>, SourceError> {
     let Some(name) = find_cookie(bytes) else {
         return Ok("utf-8".into());
     };
+    if is_utf8_encoding(&name) {
+        return Ok("utf-8".into());
+    }
     Ok(match name.as_str() {
         "latin-1" => "iso-8859-1".into(),
         other => other.into(),
@@ -365,7 +368,7 @@ fn is_comment_or_blank(line: &[u8]) -> bool {
 }
 
 fn is_utf8_encoding(name: &str) -> bool {
-    matches!(name, "utf-8" | "utf8")
+    matches!(name.replace(['-', '_'], "").as_str(), "utf8" | "utf8sig")
 }
 
 fn decode_utf8(bytes: &[u8]) -> Result<String, SourceError> {
@@ -499,6 +502,20 @@ mod tests {
         assert_eq!(detect_encoding(b"# foo coding: latin-1\n"), expected());
         assert_eq!(detect_encoding(b"# nocoding: latin-1\n"), expected());
         assert_eq!(detect_encoding(b"# CODING=latin-1\n"), Ok(SourceEncoding::Utf8));
+    }
+
+    #[test]
+    fn accepts_utf8_codec_aliases() {
+        assert_eq!(detect_encoding(b"# coding: utf_8\n"), Ok(SourceEncoding::Utf8));
+        assert_eq!(detect_encoding(b"# coding: utf-8-sig\n"), Ok(SourceEncoding::Utf8));
+        assert_eq!(detected_encoding_name(b"# coding: utf_8\n"), Ok("utf-8".into()));
+        assert_eq!(detected_encoding_name(b"# coding: utf-8-sig\n"), Ok("utf-8".into()));
+        assert_eq!(
+            SourceFile::from_bytes("alias.py", b"# coding: utf-8-sig\nvalue = 1\n")
+                .expect("UTF-8 aliases should decode")
+                .text(),
+            "# coding: utf-8-sig\nvalue = 1\n"
+        );
     }
 
     #[test]

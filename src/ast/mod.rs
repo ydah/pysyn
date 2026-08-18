@@ -118,7 +118,16 @@ impl StringLiteralValue {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModModule {
     pub body: Vec<Stmt>,
+    pub type_ignores: Vec<TypeIgnore>,
     pub range: TextRange,
+    pub(crate) source: Option<Box<str>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypeIgnore {
+    pub range: TextRange,
+    pub lineno: u32,
+    pub tag: Box<str>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -639,6 +648,7 @@ pub trait Ranged {
 macro_rules! ranged_structs { ($($ty:ty),+ $(,)?) => { $(impl Ranged for $ty { fn range(&self) -> TextRange { self.range } })+ }; }
 ranged_structs!(
     ModModule,
+    TypeIgnore,
     StmtFunctionDef,
     StmtClassDef,
     StmtReturn,

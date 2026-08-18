@@ -655,7 +655,18 @@ impl<'src> Scanner<'src> {
         let quote_offset = raw.find(['\'', '"']).unwrap_or(0);
         let delimiter = if triple { 3 } else { 1 };
         let body_start = start + quote_offset + delimiter;
-        let body_end = end.saturating_sub(delimiter);
+        let has_closing_delimiter = if triple {
+            if raw.as_bytes().get(quote_offset) == Some(&b'\'') {
+                raw.as_bytes().ends_with(b"'''")
+            } else {
+                raw.as_bytes().ends_with(b"\"\"\"")
+            }
+        } else if raw.as_bytes().get(quote_offset) == Some(&b'\'') {
+            raw.as_bytes().ends_with(b"'")
+        } else {
+            raw.as_bytes().ends_with(b"\"")
+        };
+        let body_end = if has_closing_delimiter { end - delimiter } else { end };
         self.emit(TokenKind::FStringStart { prefix, triple }, start, body_start);
         let mut cursor = body_start;
         let mut literal_start = body_start;
@@ -952,7 +963,7 @@ fn matching_fstring_brace(source: &str, start: usize, end: usize) -> usize {
             }
             _ => {}
         }
-        cursor += 1;
+        cursor += char_len_at(source, cursor);
     }
     end
 }

@@ -3,6 +3,7 @@
 use std::mem::size_of;
 
 use pysyn::ast::{Expr, ExprContext, Stmt};
+use pysyn::error::Severity;
 use pysyn::lexer::{tokenize_with, LexMode, LexOptions};
 use pysyn::parser::{parse, ParseMode, ParseOptions};
 use pysyn::token::{PythonVersion, TokenKind};
@@ -59,6 +60,64 @@ fn keeps_comments_as_side_table() {
 }
 
 #[test]
+fn preserves_enabled_type_comments_and_invalid_escape_warnings() {
+    let source = "x = 1  # type: int\nfor item in values:  # type: str\n    pass\n".to_owned()
+        + "def convert(value):  # type: (int) -> str\n    return value\n";
+    let parsed = parse(&source, ParseOptions { type_comments: true, ..ParseOptions::default() });
+    let Stmt::Assign(assign) = &parsed.module.body[0] else { panic!("expected assignment") };
+    assert_eq!(assign.type_comment.as_deref(), Some("int"));
+    let Stmt::For(for_stmt) = &parsed.module.body[1] else { panic!("expected for") };
+    assert_eq!(for_stmt.type_comment.as_deref(), Some("str"));
+    let Stmt::FunctionDef(function) = &parsed.module.body[2] else { panic!("expected function") };
+    assert_eq!(function.type_comment.as_deref(), Some("(int) -> str"));
+    assert!(!parsed.errors.iter().any(|error| error.severity == Severity::Error));
+
+    let parsed = parse("value = \"\\q\"\n", ParseOptions::default());
+    assert!(parsed.errors.iter().any(|error| {
+        error.code == pysyn::DiagnosticCode::InvalidEscape && error.severity == Severity::Warning
+    }));
+    let parsed = parse(&(r#"value = f"\q{x}""#.to_owned() + "\n"), ParseOptions::default());
+    assert!(parsed.errors.iter().any(|error| {
+        error.code == pysyn::DiagnosticCode::InvalidEscape && error.severity == Severity::Warning
+    }));
+    let parsed = parse("value = \"\\400\"\n", ParseOptions::default());
+    assert!(parsed.errors.iter().any(|error| {
+        error.code == pysyn::DiagnosticCode::InvalidEscape && error.severity == Severity::Warning
+    }));
+    let parsed = parse("value = r\"\\q\"\n", ParseOptions::default());
+    assert!(!parsed.errors.iter().any(|error| error.code == pysyn::DiagnosticCode::InvalidEscape));
+}
+
+#[test]
+fn preserves_type_ignore_comments_when_type_comments_are_enabled() {
+    let parsed = parse(
+        "# type: ignore\nvalue = 1  # type: ignore[assignment]\n",
+        ParseOptions { type_comments: true, ..ParseOptions::default() },
+    );
+    assert_eq!(parsed.module.type_ignores.len(), 2);
+    assert_eq!(parsed.module.type_ignores[0].lineno, 1);
+    assert_eq!(parsed.module.type_ignores[0].tag.as_ref(), "\n");
+    assert_eq!(parsed.module.type_ignores[1].tag.as_ref(), "[assignment]");
+    let dump = pysyn::printer::dump(&parsed.module, Default::default());
+    assert!(dump.contains("TypeIgnore(lineno=1, tag='\\n')"));
+}
+
+#[test]
+fn dump_includes_source_locations() {
+    let module = pysyn::parse_module("value = 1\n").expect("valid source");
+    let dump = pysyn::printer::dump(&module, Default::default());
+    assert!(dump.contains("Assign(targets=[Name(id='value'"));
+    assert!(dump.contains("lineno=1, col_offset=0, end_lineno=1, end_col_offset=9"));
+    assert!(dump.contains("Constant(value=1"));
+
+    let pretty = pysyn::printer::dump(
+        &module,
+        pysyn::printer::DumpOptions::with_attributes(false).with_indent(Some(2)),
+    );
+    assert!(pretty.contains('\n'));
+}
+
+#[test]
 fn tokenizes_and_parses_nested_f_strings() {
     let source = "f\"a{x!r:>{width}}b\"";
     let tokens = pysyn::lexer::tokenize(source).filter_map(Result::ok).collect::<Vec<_>>();
@@ -110,7 +169,7 @@ fn tokenizes_raw_fstring_fields_and_unicode_name_escapes() {
     let module = pysyn::parse_module("value = fr'\\N{AMPERSAND}'\n")
         .expect("raw f-string field should parse");
     let dump = pysyn::printer::dump(&module, Default::default());
-    assert!(dump.contains("Constant(value='\\\\N')"));
+    assert!(dump.contains("Constant(value='\\\\N'"));
     assert!(dump.contains("FormattedValue(value=Name(id='AMPERSAND'"));
 }
 
@@ -230,8 +289,8 @@ fn preserves_python_expression_precedence_and_literal_kinds() {
     let dump = pysyn::printer::dump(&module, Default::default());
     assert!(dump.contains("BinOp(left=UnaryOp(op=USub(), operand=Name(id='number'"));
     assert!(dump.contains("Compare(left=Compare(left=Name(id='left'"));
-    assert!(dump.contains("JoinedStr(values=[Constant(value='prefix value='), FormattedValue"));
-    assert!(dump.contains("Constant(value=0x13579ace)"));
+    assert!(dump.contains("JoinedStr(values=[Constant(value='prefix value='"));
+    assert!(dump.contains("Constant(value=0x13579ace"));
 }
 
 #[test]
@@ -266,7 +325,16 @@ fn accepts_pep701_fstring_forms_and_unicode_names() {
     let module = pysyn::parse_module(source).expect("valid PEP 701 source");
     let dump = pysyn::printer::dump(&module, Default::default());
     assert!(dump.contains("conversion=114"));
-    assert!(dump.contains("Constant(value='Δ')"));
+    assert!(dump.contains("Constant(value='Δ'"));
+}
+
+#[test]
+fn recovers_non_ascii_fstring_fields_without_panicking() {
+    let parsed = parse(
+        "F'😀{value}'\n",
+        ParseOptions { parse_mode: ParseMode::Recover, ..ParseOptions::default() },
+    );
+    assert!(!parsed.module.body.is_empty());
 }
 
 #[test]

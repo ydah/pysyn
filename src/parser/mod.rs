@@ -3,11 +3,11 @@
 #![allow(missing_docs)]
 
 use crate::ast::*;
-use crate::error::{Diagnostic, ParseError, Severity};
+use crate::error::{Diagnostic, DiagnosticCode, ParseError, Severity};
 use crate::lexer::{tokenize_with, LexMode, LexOptions};
-use crate::source::{TextRange, TextSize};
+use crate::source::{LineIndex, TextRange, TextSize};
 use crate::token::{PythonVersion, Token, TokenKind};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 #[cfg(feature = "nfkc")]
 use unicode_normalization::UnicodeNormalization;
 
@@ -94,6 +94,7 @@ pub fn parse_expression(src: &str) -> Result<Expr, ParseError> {
 
 /// Parses source with the requested recovery and version options.
 pub fn parse(src: &str, options: ParseOptions) -> Parsed {
+    let escape_warnings = collect_invalid_escape_warnings(src, options.version);
     let mut parser = Parser::new(src, options);
     let module = match parser.options.mode {
         SourceMode::Expression => match parser.expression(0) {
@@ -102,24 +103,143 @@ pub fn parse(src: &str, options: ParseOptions) -> Parsed {
                     range: expression.range(),
                     value: Box::new(expression),
                 })],
+                type_ignores: if parser.options.type_comments {
+                    collect_type_ignores(src)
+                } else {
+                    Vec::new()
+                },
                 range: TextRange::from_usize(0, src.len()),
+                source: Some(src.into()),
             },
             Err(error) => {
                 parser.push_error(error.diagnostic);
-                ModModule { body: Vec::new(), range: TextRange::from_usize(0, src.len()) }
+                ModModule {
+                    body: Vec::new(),
+                    type_ignores: if parser.options.type_comments {
+                        collect_type_ignores(src)
+                    } else {
+                        Vec::new()
+                    },
+                    range: TextRange::from_usize(0, src.len()),
+                    source: Some(src.into()),
+                }
             }
         },
         SourceMode::Module | SourceMode::Interactive => match parser.parse_module_inner() {
             Ok(module) => module,
             Err(error) => {
                 parser.push_error(error.diagnostic);
-                ModModule { body: Vec::new(), range: TextRange::from_usize(0, src.len()) }
+                ModModule {
+                    body: Vec::new(),
+                    type_ignores: if parser.options.type_comments {
+                        collect_type_ignores(src)
+                    } else {
+                        Vec::new()
+                    },
+                    range: TextRange::from_usize(0, src.len()),
+                    source: Some(src.into()),
+                }
             }
         },
     };
+    parser.errors.extend(escape_warnings);
     let comments = if parser.options.keep_comments { collect_comments(src) } else { Vec::new() };
     let tokens = if parser.options.keep_tokens { parser.tokens.clone() } else { Vec::new() };
     Parsed { module, comments, tokens, errors: parser.errors }
+}
+
+fn collect_invalid_escape_warnings(src: &str, version: PythonVersion) -> Vec<Diagnostic> {
+    tokenize_with(src, LexOptions { mode: LexMode::Parse, version })
+        .filter_map(Result::ok)
+        .filter_map(|token| {
+            let TokenKind::String { prefix, triple } = token.kind else { return None };
+            if prefix.is_raw() {
+                return None;
+            }
+            let raw = &src[token.range];
+            let quote = raw.find(['\'', '"'])?;
+            let delimiter = if triple { 3 } else { 1 };
+            let body_start = quote + delimiter;
+            let body_end = raw.len().checked_sub(delimiter)?;
+            let body = raw.get(body_start..body_end)?;
+            invalid_escape_in(body, token.range.start().as_usize() + body_start)
+        })
+        .collect()
+}
+
+fn invalid_escape_in(value: &str, offset: usize) -> Option<Diagnostic> {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'\\' {
+            index += 1;
+            continue;
+        }
+        let escape_start = index;
+        index += 1;
+        let valid = match bytes.get(index).copied() {
+            Some(b'\\' | b'\'' | b'"' | b'a' | b'b' | b'f' | b'n' | b'r' | b't' | b'v' | b'\n') => {
+                index += 1;
+                true
+            }
+            Some(b'\r') => {
+                index += 1;
+                if bytes.get(index) == Some(&b'\n') {
+                    index += 1;
+                }
+                true
+            }
+            Some(byte @ b'0'..=b'7') => {
+                let mut value = (byte - b'0') as u16;
+                index += 1;
+                for _ in 0..2 {
+                    if bytes.get(index).is_some_and(|next| (b'0'..=b'7').contains(next)) {
+                        value = value * 8 + (bytes[index] - b'0') as u16;
+                        index += 1;
+                    } else {
+                        break;
+                    }
+                }
+                value <= 0o377
+            }
+            Some(b'x') => valid_hex_escape(bytes, &mut index, 2),
+            Some(b'u') => valid_hex_escape(bytes, &mut index, 4),
+            Some(b'U') => valid_hex_escape(bytes, &mut index, 8),
+            Some(b'N') => valid_named_escape(bytes, &mut index),
+            Some(_) | None => false,
+        };
+        if !valid {
+            let end = index.max(escape_start + 1).min(value.len());
+            return Some(Diagnostic::warning(
+                DiagnosticCode::InvalidEscape,
+                TextRange::from_usize(offset + escape_start, offset + end),
+                "invalid escape sequence",
+            ));
+        }
+    }
+    None
+}
+
+fn valid_hex_escape(bytes: &[u8], index: &mut usize, count: usize) -> bool {
+    *index += 1;
+    let start = *index;
+    while *index < bytes.len() && *index - start < count && bytes[*index].is_ascii_hexdigit() {
+        *index += 1;
+    }
+    *index - start == count
+}
+
+fn valid_named_escape(bytes: &[u8], index: &mut usize) -> bool {
+    *index += 1;
+    if bytes.get(*index) != Some(&b'{') {
+        return false;
+    }
+    *index += 1;
+    let start = *index;
+    while *index < bytes.len() && bytes[*index] != b'}' {
+        *index += 1;
+    }
+    *index > start && bytes.get(*index) == Some(&b'}')
 }
 
 fn collect_comments(src: &str) -> Vec<Comment> {
@@ -127,6 +247,29 @@ fn collect_comments(src: &str) -> Vec<Comment> {
         .filter_map(|item| item.ok())
         .filter(|token| token.kind == TokenKind::Comment)
         .map(|token| Comment { range: token.range, text: src[token.range].into() })
+        .collect()
+}
+
+fn collect_type_ignores(src: &str) -> Vec<TypeIgnore> {
+    let index = LineIndex::new(src);
+    tokenize_with(src, LexOptions { mode: LexMode::Full, ..LexOptions::default() })
+        .filter_map(Result::ok)
+        .filter(|token| token.kind == TokenKind::Comment)
+        .filter_map(|token| {
+            let comment = src.get(token.range.start().as_usize()..token.range.end().as_usize())?;
+            let suffix = comment.strip_prefix('#')?.trim_start();
+            let suffix = suffix.strip_prefix("type:")?.trim_start();
+            let tag = suffix.strip_prefix("ignore")?;
+            if !tag.is_empty() && !tag.starts_with('[') {
+                return None;
+            }
+            let tag = if tag.starts_with('[') { tag.trim().to_owned() } else { "\n".into() };
+            Some(TypeIgnore {
+                range: token.range,
+                lineno: index.line_col_chars(src, token.range.start()).line,
+                tag: tag.into(),
+            })
+        })
         .collect()
 }
 
@@ -139,6 +282,8 @@ struct Parser<'src> {
     depth: u32,
     expression_nodes: usize,
     grouped_expressions: HashSet<TextRange>,
+    grouped_expression_ranges: HashMap<TextRange, TextRange>,
+    grouped_pattern_ranges: HashMap<TextRange, TextRange>,
     stop_in: bool,
 }
 
@@ -176,6 +321,8 @@ impl<'src> Parser<'src> {
             depth: 0,
             expression_nodes: 0,
             grouped_expressions: HashSet::new(),
+            grouped_expression_ranges: HashMap::new(),
+            grouped_pattern_ranges: HashMap::new(),
             stop_in: false,
         }
     }
@@ -206,7 +353,16 @@ impl<'src> Parser<'src> {
                 break;
             }
         }
-        Ok(ModModule { body, range: TextRange::from_usize(0, self.src.len()) })
+        Ok(ModModule {
+            body,
+            type_ignores: if self.options.type_comments {
+                collect_type_ignores(self.src)
+            } else {
+                Vec::new()
+            },
+            range: TextRange::from_usize(0, self.src.len()),
+            source: Some(self.src.into()),
+        })
     }
 
     fn statement(&mut self) -> Result<Stmt, ParseError> {
@@ -349,9 +505,10 @@ impl<'src> Parser<'src> {
         let type_params = self.type_parameters()?;
         self.expect(TokenKind::Equal)?;
         let value = Box::new(self.expression(0)?);
+        let end = self.statement_end(value.range().end());
         self.consume_line_end();
         Ok(Stmt::TypeAlias(StmtTypeAlias {
-            range: TextRange::new(start, value.range().end()),
+            range: TextRange::new(start, end),
             name: Box::new(name),
             type_params,
             value,
@@ -371,11 +528,10 @@ impl<'src> Parser<'src> {
         let returns =
             if self.eat(TokenKind::Arrow) { Some(Box::new(self.expression(0)?)) } else { None };
         self.expect(TokenKind::Colon)?;
+        let type_comment = self.trailing_type_comment(self.previous().range.end());
         let body = self.block()?;
-        let range = TextRange::new(
-            start,
-            body.last().map(Ranged::range).unwrap_or_else(|| self.previous().range).end(),
-        );
+        let end = body.last().map(Ranged::range).unwrap_or_else(|| self.previous().range).end();
+        let range = TextRange::new(start, self.suite_end(end));
         let node = StmtFunctionDef {
             range,
             name,
@@ -384,7 +540,7 @@ impl<'src> Parser<'src> {
             args,
             returns,
             body,
-            type_comment: None,
+            type_comment,
         };
         Ok(if is_async {
             Stmt::AsyncFunctionDef(Box::new(node))
@@ -403,8 +559,16 @@ impl<'src> Parser<'src> {
         if self.eat(TokenKind::LPar) {
             while !self.at(TokenKind::RPar) && !self.at(TokenKind::EndMarker) {
                 if self.eat(TokenKind::DoubleStar) {
+                    let starstar = self.previous();
                     let value = self.expression(0)?;
-                    keywords.push(Keyword { range: value.range(), arg: None, value });
+                    keywords.push(Keyword {
+                        range: TextRange::new(
+                            starstar.range.start(),
+                            self.expression_range(&value).end(),
+                        ),
+                        arg: None,
+                        value,
+                    });
                     if !self.eat(TokenKind::Comma) {
                         break;
                     }
@@ -417,7 +581,7 @@ impl<'src> Parser<'src> {
                         keywords.push(Keyword {
                             range: TextRange::new(
                                 value.range().start(),
-                                keyword_value.range().end(),
+                                self.expression_range(&keyword_value).end(),
                             ),
                             arg: Some(name_node.id.clone()),
                             value: keyword_value,
@@ -436,10 +600,8 @@ impl<'src> Parser<'src> {
         }
         self.expect(TokenKind::Colon)?;
         let body = self.block()?;
-        let range = TextRange::new(
-            start,
-            body.last().map(Ranged::range).unwrap_or_else(|| self.previous().range).end(),
-        );
+        let end = body.last().map(Ranged::range).unwrap_or_else(|| self.previous().range).end();
+        let range = TextRange::new(start, self.suite_end(end));
         Ok(Stmt::ClassDef(Box::new(StmtClassDef {
             range,
             name,
@@ -470,6 +632,7 @@ impl<'src> Parser<'src> {
             .or_else(|| body.last().map(Ranged::range))
             .unwrap_or_else(|| self.previous().range)
             .end();
+        let end = self.suite_end(end);
         Ok(Stmt::If(StmtIf { range: TextRange::new(start, end), test, body, orelse }))
     }
 
@@ -492,6 +655,7 @@ impl<'src> Parser<'src> {
             .or_else(|| body.last().map(Ranged::range))
             .unwrap_or_else(|| self.previous().range)
             .end();
+        let end = self.suite_end(end);
         Ok(Stmt::If(StmtIf { range: TextRange::new(start, end), test, body, orelse }))
     }
 
@@ -512,6 +676,7 @@ impl<'src> Parser<'src> {
             .or_else(|| body.last().map(Ranged::range))
             .unwrap_or_else(|| self.previous().range)
             .end();
+        let end = self.suite_end(end);
         Ok(Stmt::While(StmtWhile { range: TextRange::new(start, end), test, body, orelse }))
     }
 
@@ -530,6 +695,7 @@ impl<'src> Parser<'src> {
         let iter =
             if self.at(TokenKind::Comma) { self.comma_expression(iter_first)? } else { iter_first };
         self.expect(TokenKind::Colon)?;
+        let type_comment = self.trailing_type_comment(self.previous().range.end());
         let body = self.block()?;
         let orelse = if self.eat(TokenKind::Else) {
             self.expect(TokenKind::Colon)?;
@@ -543,13 +709,14 @@ impl<'src> Parser<'src> {
             .or_else(|| body.last().map(Ranged::range))
             .unwrap_or_else(|| self.previous().range)
             .end();
+        let end = self.suite_end(end);
         let node = StmtFor {
             range: TextRange::new(start, end),
             target: Box::new(target),
             iter: Box::new(iter),
             body,
             orelse,
-            type_comment: None,
+            type_comment,
         };
         Ok(if is_async { Stmt::AsyncFor(node) } else { Stmt::For(node) })
     }
@@ -590,9 +757,11 @@ impl<'src> Parser<'src> {
             self.expect(TokenKind::RPar)?;
         }
         self.expect(TokenKind::Colon)?;
+        let type_comment = self.trailing_type_comment(self.previous().range.end());
         let body = self.block()?;
         let end = body.last().map(Ranged::range).unwrap_or_else(|| self.previous().range).end();
-        let node = StmtWith { range: TextRange::new(start, end), items, body, type_comment: None };
+        let end = self.suite_end(end);
+        let node = StmtWith { range: TextRange::new(start, end), items, body, type_comment };
         Ok(if is_async { Stmt::AsyncWith(node) } else { Stmt::With(node) })
     }
 
@@ -632,6 +801,7 @@ impl<'src> Parser<'src> {
                 .map(Ranged::range)
                 .unwrap_or_else(|| self.previous().range)
                 .end();
+            let end = self.suite_end(end);
             handlers.push(ExceptHandler {
                 range: TextRange::new(handler_start, end),
                 typ,
@@ -662,6 +832,7 @@ impl<'src> Parser<'src> {
             .or_else(|| body.last().map(Ranged::range))
             .unwrap_or_else(|| self.previous().range)
             .end();
+        let end = self.suite_end(end);
         let node = StmtTry { range: TextRange::new(start, end), body, handlers, orelse, finalbody };
         Ok(if is_star { Stmt::TryStar(Box::new(node)) } else { Stmt::Try(Box::new(node)) })
     }
@@ -681,6 +852,7 @@ impl<'src> Parser<'src> {
             .map(|value| value.range())
             .unwrap_or_else(|| self.previous().range)
             .end();
+        let end = self.statement_end(end);
         self.consume_line_end();
         Ok(Stmt::Return(StmtReturn { range: TextRange::new(start, end), value }))
     }
@@ -696,6 +868,7 @@ impl<'src> Parser<'src> {
             .map(|value| value.range())
             .unwrap_or_else(|| self.previous().range)
             .end();
+        let end = self.statement_end(end);
         self.consume_line_end();
         Ok(Stmt::Raise(StmtRaise { range: TextRange::new(start, end), exc, cause }))
     }
@@ -706,6 +879,7 @@ impl<'src> Parser<'src> {
         let msg =
             if self.eat(TokenKind::Comma) { Some(Box::new(self.expression(0)?)) } else { None };
         let end = msg.as_ref().map(|value| value.range()).unwrap_or_else(|| test.range()).end();
+        let end = self.statement_end(end);
         self.consume_line_end();
         Ok(Stmt::Assert(StmtAssert { range: TextRange::new(start, end), test, msg }))
     }
@@ -728,8 +902,8 @@ impl<'src> Parser<'src> {
                 break;
             }
         }
+        let end = self.statement_end(names.last().map(Ranged::range).unwrap_or_default().end());
         self.consume_line_end();
-        let end = self.previous().range.end();
         Ok(Stmt::Import(StmtImport { range: TextRange::new(start, end), names }))
     }
 
@@ -775,8 +949,8 @@ impl<'src> Parser<'src> {
                 self.expect(TokenKind::RPar)?;
             }
         }
+        let end = self.statement_end(names.last().map(Ranged::range).unwrap_or_default().end());
         self.consume_line_end();
-        let end = self.previous().range.end();
         Ok(Stmt::ImportFrom(StmtImportFrom {
             range: TextRange::new(start, end),
             module,
@@ -788,15 +962,15 @@ impl<'src> Parser<'src> {
     fn names_statement(&mut self, global: bool) -> Result<Stmt, ParseError> {
         let start = self.bump().range.start();
         let mut names = Vec::new();
-        loop {
+        let end = loop {
             let token = self.expect(TokenKind::Name)?;
             names.push(self.name_text(token).to_owned().into());
             if !self.eat(TokenKind::Comma) {
-                break;
+                break token.range.end();
             }
-        }
+        };
         self.consume_line_end();
-        let node = StmtNames { range: TextRange::new(start, self.previous().range.end()), names };
+        let node = StmtNames { range: TextRange::new(start, end), names };
         Ok(if global { Stmt::Global(node) } else { Stmt::Nonlocal(node) })
     }
 
@@ -825,6 +999,7 @@ impl<'src> Parser<'src> {
             targets.push(mark_delete(self.expression(0)?)?);
         }
         let end = targets.last().map(Ranged::range).unwrap_or_else(|| self.previous().range).end();
+        let end = self.statement_end(end);
         self.consume_line_end();
         Ok(Stmt::Delete(StmtDelete { range: TextRange::new(start, end), targets }))
     }
@@ -834,7 +1009,7 @@ impl<'src> Parser<'src> {
         if self.at(TokenKind::Comma) {
             first = self.comma_expression(first)?;
         }
-        let first_start = first.range().start();
+        let first_start = self.expression_range(&first).start();
         if self.eat(TokenKind::Colon) {
             let target = mark_store(first)?;
             let annotation = Box::new(self.expression(0)?);
@@ -845,6 +1020,7 @@ impl<'src> Parser<'src> {
                 .map(|value| value.range())
                 .unwrap_or_else(|| annotation.range())
                 .end();
+            let end = self.statement_end(end);
             self.consume_line_end();
             let simple = matches!(target, Expr::Name(_))
                 && !self.grouped_expressions.contains(&target.range());
@@ -864,10 +1040,11 @@ impl<'src> Parser<'src> {
             } else {
                 value_first
             };
+            let end = self.statement_end(value.range().end());
             self.consume_line_end();
             let target = mark_store(first)?;
             return Ok(Stmt::AugAssign(StmtAugAssign {
-                range: TextRange::new(first_start, value.range().end()),
+                range: TextRange::new(first_start, end),
                 target: Box::new(target),
                 op,
                 value: Box::new(value),
@@ -882,19 +1059,18 @@ impl<'src> Parser<'src> {
                 let next_value = self.expression(0)?;
                 value = self.comma_expression(next_value)?;
             }
+            let end = self.statement_end(value.range().end());
             self.consume_line_end();
+            let type_comment = self.trailing_type_comment(end);
             return Ok(Stmt::Assign(StmtAssign {
-                range: TextRange::new(
-                    targets.first().map(Ranged::range).unwrap_or_default().start(),
-                    value.range().end(),
-                ),
+                range: TextRange::new(first_start, end),
                 targets,
                 value: Box::new(value),
-                type_comment: None,
+                type_comment,
             }));
         }
         self.consume_line_end();
-        Ok(Stmt::Expr(StmtExpr { range: first.range(), value: Box::new(first) }))
+        Ok(Stmt::Expr(StmtExpr { range: self.expression_range(&first), value: Box::new(first) }))
     }
 
     fn block(&mut self) -> Result<Vec<Stmt>, ParseError> {
@@ -935,7 +1111,6 @@ impl<'src> Parser<'src> {
                 continue;
             }
             if self.eat(TokenKind::DoubleStar) {
-                let start = self.previous().range.start();
                 let token = self.expect(TokenKind::Name)?;
                 let annotation = if self.eat(TokenKind::Colon) {
                     Some(Box::new(self.expression(0)?))
@@ -944,10 +1119,10 @@ impl<'src> Parser<'src> {
                 };
                 let end = annotation
                     .as_ref()
-                    .map(|value| value.range().end())
+                    .map(|value| self.expression_range(value).end())
                     .unwrap_or(token.range.end());
                 parameters.kwarg = Some(Parameter {
-                    range: TextRange::new(start, end),
+                    range: TextRange::new(token.range.start(), end),
                     name: normalize_identifier(self.name_text(token)),
                     annotation,
                     default: None,
@@ -956,7 +1131,6 @@ impl<'src> Parser<'src> {
                 self.eat(TokenKind::Comma);
                 continue;
             } else if self.eat(TokenKind::Star) {
-                let start = self.previous().range.start();
                 if self.at(TokenKind::Name) {
                     let token = self.bump();
                     let annotation = if self.eat(TokenKind::Colon) {
@@ -966,10 +1140,10 @@ impl<'src> Parser<'src> {
                     };
                     let end = annotation
                         .as_ref()
-                        .map(|value| value.range().end())
+                        .map(|value| self.expression_range(value).end())
                         .unwrap_or(token.range.end());
                     parameters.vararg = Some(Parameter {
-                        range: TextRange::new(start, end),
+                        range: TextRange::new(token.range.start(), end),
                         name: normalize_identifier(self.name_text(token)),
                         annotation,
                         default: None,
@@ -1000,10 +1174,9 @@ impl<'src> Parser<'src> {
                     }
                     None
                 };
-                let end = default
+                let end = annotation
                     .as_ref()
-                    .map(|value| value.range().end())
-                    .or_else(|| annotation.as_ref().map(|value| value.range().end()))
+                    .map(|value| self.expression_range(value).end())
                     .unwrap_or(token.range.end());
                 let parameter = Parameter {
                     range: TextRange::new(token.range.start(), end),
@@ -1044,12 +1217,15 @@ impl<'src> Parser<'src> {
                 .pop()
                 .unwrap_or(Pattern::Invalid(PatternInvalid { range: TextRange::empty(start) }))
         } else {
-            let end = patterns.last().map(Ranged::range).unwrap_or_default().end();
+            let end = patterns
+                .last()
+                .map(|pattern| self.pattern_range(pattern).end())
+                .unwrap_or_default();
             Pattern::Or(PatternOr { range: TextRange::new(start, end), patterns })
         };
         if self.eat(TokenKind::As) {
             let name = self.expect(TokenKind::Name)?;
-            let range = TextRange::new(pattern.range().start(), name.range.end());
+            let range = TextRange::new(self.pattern_range(&pattern).start(), name.range.end());
             pattern = Pattern::As(PatternAs {
                 range,
                 pattern: Some(Box::new(pattern)),
@@ -1066,6 +1242,7 @@ impl<'src> Parser<'src> {
         }
         let start = first.range().start();
         let mut patterns = vec![first];
+        let mut trailing_comma_end = Some(self.previous().range.end());
         while !matches!(
             self.current().kind,
             TokenKind::Colon | TokenKind::If | TokenKind::EndMarker
@@ -1074,8 +1251,10 @@ impl<'src> Parser<'src> {
             if !self.eat(TokenKind::Comma) {
                 break;
             }
+            trailing_comma_end = Some(self.previous().range.end());
         }
         let end = patterns.last().map(Ranged::range).unwrap_or_default().end();
+        let end = trailing_comma_end.map_or(end, |comma| end.max(comma));
         Ok(Pattern::Sequence(PatternSequence { range: TextRange::new(start, end), patterns }))
     }
 
@@ -1121,7 +1300,8 @@ impl<'src> Parser<'src> {
                 }
                 let first = self.pattern()?;
                 if !self.eat(TokenKind::Comma) {
-                    self.expect(TokenKind::RPar)?;
+                    let end = self.expect(TokenKind::RPar)?.range.end();
+                    self.grouped_pattern_ranges.insert(first.range(), TextRange::new(start, end));
                     return Ok(first);
                 }
                 let mut patterns = vec![first];
@@ -1311,19 +1491,22 @@ impl<'src> Parser<'src> {
         if !self.eat(TokenKind::Comma) {
             return Ok(first);
         }
-        let start = first.range().start();
+        let start = self.expression_range(&first).start();
         let mut elts = vec![first];
+        let mut end = self.previous().range.end();
         while !self.at_line_end()
             && !self.at(TokenKind::Equal)
             && !self.at(TokenKind::Colon)
             && !self.at(TokenKind::In)
         {
-            elts.push(self.expression(0)?);
+            let expression = self.expression(0)?;
+            end = self.expression_range(&expression).end();
+            elts.push(expression);
             if !self.eat(TokenKind::Comma) {
                 break;
             }
+            end = self.previous().range.end();
         }
-        let end = elts.last().map(Ranged::range).unwrap_or_default().end();
         Ok(Expr::Tuple(ExprSequence {
             range: TextRange::new(start, end),
             elts,
@@ -1348,7 +1531,10 @@ impl<'src> Parser<'src> {
                 let test = self.expression(0)?;
                 self.expect(TokenKind::Else)?;
                 let orelse = self.expression(1)?;
-                let range = TextRange::new(left.range().start(), orelse.range().end());
+                let range = TextRange::new(
+                    self.expression_range(&left).start(),
+                    self.expression_range(&orelse).end(),
+                );
                 left = Expr::IfExp(ExprIfExp {
                     range,
                     body: Box::new(left),
@@ -1360,7 +1546,10 @@ impl<'src> Parser<'src> {
             if kind == TokenKind::ColonEqual && minimum <= 1 {
                 self.bump();
                 let value = self.expression(1)?;
-                let range = TextRange::new(left.range().start(), value.range().end());
+                let range = TextRange::new(
+                    self.expression_range(&left).start(),
+                    self.expression_range(&value).end(),
+                );
                 left = Expr::NamedExpr(ExprNamedExpr {
                     range,
                     target: Box::new(mark_store(left)?),
@@ -1399,8 +1588,12 @@ impl<'src> Parser<'src> {
                     ops.push(operator);
                     comparators.push(right);
                     let range = TextRange::new(
-                        left.range().start(),
-                        comparators.last().map(Ranged::range).unwrap_or(left.range()).end(),
+                        self.expression_range(&left).start(),
+                        comparators
+                            .last()
+                            .map(|value| self.expression_range(value))
+                            .unwrap_or_else(|| self.expression_range(&left))
+                            .end(),
                     );
                     left = Expr::Compare(Box::new(ExprCompare {
                         range,
@@ -1423,7 +1616,10 @@ impl<'src> Parser<'src> {
             }
             self.bump();
             let right = self.expression(if right_assoc { precedence } else { precedence + 1 })?;
-            let range = TextRange::new(left.range().start(), right.range().end());
+            let range = TextRange::new(
+                self.expression_range(&left).start(),
+                self.expression_range(&right).end(),
+            );
             left = Expr::BinOp(ExprBinOp {
                 range,
                 left: Box::new(left),
@@ -1444,7 +1640,10 @@ impl<'src> Parser<'src> {
         self.bump();
         let right = self.expression(precedence + 1);
         let right = right?;
-        let range = TextRange::new(left.range().start(), right.range().end());
+        let range = TextRange::new(
+            self.expression_range(&left).start(),
+            self.expression_range(&right).end(),
+        );
         let mut values = match left {
             Expr::BoolOp(node)
                 if node.op == op && !self.grouped_expressions.contains(&node.range) =>
@@ -1472,7 +1671,7 @@ impl<'src> Parser<'src> {
                 self.bump();
                 let value = self.expression(6)?;
                 Expr::Starred(ExprStarred {
-                    range: TextRange::new(token.range.start(), value.range().end()),
+                    range: TextRange::new(token.range.start(), self.expression_range(&value).end()),
                     value: Box::new(value),
                     ctx: ExprContext::Load,
                 })
@@ -1487,7 +1686,10 @@ impl<'src> Parser<'src> {
                 };
                 let operand = self.expression(if op == UnaryOperator::Not { 4 } else { 11 })?;
                 Expr::UnaryOp(ExprUnaryOp {
-                    range: TextRange::new(token.range.start(), operand.range().end()),
+                    range: TextRange::new(
+                        token.range.start(),
+                        self.expression_range(&operand).end(),
+                    ),
                     op,
                     operand: Box::new(operand),
                 })
@@ -1496,7 +1698,7 @@ impl<'src> Parser<'src> {
                 self.bump();
                 let value = self.expression(6)?;
                 Expr::Await(ExprUnaryValue {
-                    range: TextRange::new(token.range.start(), value.range().end()),
+                    range: TextRange::new(token.range.start(), self.expression_range(&value).end()),
                     value: Some(Box::new(value)),
                 })
             }
@@ -1529,12 +1731,18 @@ impl<'src> Parser<'src> {
                     Some((from, value)) => {
                         if from {
                             Expr::YieldFrom(ExprUnaryValue {
-                                range: TextRange::new(token.range.start(), value.range().end()),
+                                range: TextRange::new(
+                                    token.range.start(),
+                                    self.expression_range(&value).end(),
+                                ),
                                 value: Some(Box::new(value)),
                             })
                         } else {
                             Expr::Yield(ExprUnaryValue {
-                                range: TextRange::new(token.range.start(), value.range().end()),
+                                range: TextRange::new(
+                                    token.range.start(),
+                                    self.expression_range(&value).end(),
+                                ),
                                 value: Some(Box::new(value)),
                             })
                         }
@@ -1548,7 +1756,7 @@ impl<'src> Parser<'src> {
                 self.expect(TokenKind::Colon)?;
                 let body = self.expression(0)?;
                 Expr::Lambda(Box::new(ExprLambda {
-                    range: TextRange::new(token.range.start(), body.range().end()),
+                    range: TextRange::new(token.range.start(), self.expression_range(&body).end()),
                     args,
                     body: Box::new(body),
                 }))
@@ -1613,7 +1821,10 @@ impl<'src> Parser<'src> {
                         range: token.range,
                         message: "empty expression".into(),
                     }));
-                    self.grouped_expressions.insert(expression.range());
+                    let expression_range = expression.range();
+                    self.grouped_expressions.insert(expression_range);
+                    self.grouped_expression_ranges
+                        .insert(expression_range, TextRange::new(token.range.start(), end));
                     Ok(expression)
                 }
             }
@@ -1796,7 +2007,10 @@ impl<'src> Parser<'src> {
                     self.bump();
                     let name = self.expect(TokenKind::Name)?;
                     let attr = normalize_identifier(self.name_text(name));
-                    let range = TextRange::new(expression.range().start(), name.range.end());
+                    let range = TextRange::new(
+                        self.expression_range(&expression).start(),
+                        name.range.end(),
+                    );
                     expression = Expr::Attribute(ExprAttribute {
                         range,
                         value: Box::new(expression),
@@ -1809,22 +2023,28 @@ impl<'src> Parser<'src> {
                     if chain_depth > self.options.max_depth {
                         return Err(ParseError::too_deep(self.current().range));
                     }
-                    let start = expression.range().start();
-                    self.bump();
+                    let start = self.expression_range(&expression).start();
+                    let call_open = self.bump();
                     let mut args = Vec::new();
                     let mut keywords = Vec::new();
                     let mut generator_arg: Option<(Expr, Vec<Comprehension>)> = None;
                     while !self.at(TokenKind::RPar) && !self.at(TokenKind::EndMarker) {
                         if self.eat(TokenKind::DoubleStar) {
+                            let starstar = self.previous();
                             let value = self.expression(0)?;
-                            keywords.push(Keyword { range: value.range(), arg: None, value });
-                        } else if self.eat(TokenKind::Star) {
+                            keywords.push(Keyword {
+                                range: TextRange::new(
+                                    starstar.range.start(),
+                                    self.expression_range(&value).end(),
+                                ),
+                                arg: None,
+                                value,
+                            });
+                        } else if self.at(TokenKind::Star) {
+                            let star = self.bump();
                             let value = self.expression(0)?;
                             args.push(Expr::Starred(ExprStarred {
-                                range: TextRange::new(
-                                    self.previous().range.start(),
-                                    value.range().end(),
-                                ),
+                                range: TextRange::new(star.range.start(), value.range().end()),
                                 value: Box::new(value),
                                 ctx: ExprContext::Load,
                             }));
@@ -1841,7 +2061,7 @@ impl<'src> Parser<'src> {
                                     keywords.push(Keyword {
                                         range: TextRange::new(
                                             value.range().start(),
-                                            keyword_value.range().end(),
+                                            self.expression_range(&keyword_value).end(),
                                         ),
                                         arg: Some(node.id.clone()),
                                         value: keyword_value,
@@ -1860,7 +2080,7 @@ impl<'src> Parser<'src> {
                     let end = self.expect(TokenKind::RPar)?.range.end();
                     if let Some((elt, generators)) = generator_arg {
                         args.push(Expr::GeneratorExp(ExprComprehension {
-                            range: TextRange::new(elt.range().start(), end),
+                            range: TextRange::new(call_open.range.start(), end),
                             elt: Box::new(elt),
                             generators,
                             key: None,
@@ -1879,17 +2099,20 @@ impl<'src> Parser<'src> {
                     if chain_depth > self.options.max_depth {
                         return Err(ParseError::too_deep(self.current().range));
                     }
-                    let start = expression.range().start();
+                    let start = self.expression_range(&expression).start();
                     self.bump();
                     let mut slices = Vec::new();
                     let mut tuple = false;
+                    let mut trailing_comma_end = None;
                     if !self.at(TokenKind::RSqb) {
                         loop {
-                            slices.push(self.subscript_item(start)?);
+                            let item_start = self.current().range.start();
+                            slices.push(self.subscript_item(item_start)?);
                             if !self.eat(TokenKind::Comma) {
                                 break;
                             }
                             tuple = true;
+                            trailing_comma_end = Some(self.previous().range.end());
                             if self.at(TokenKind::RSqb) {
                                 break;
                             }
@@ -1908,10 +2131,12 @@ impl<'src> Parser<'src> {
                                 message: "empty subscript".into(),
                             })
                         } else {
+                            let end = slices.last().map(Ranged::range).unwrap_or_default().end();
+                            let end = trailing_comma_end.map_or(end, |comma| end.max(comma));
                             Expr::Tuple(ExprSequence {
                                 range: TextRange::new(
                                     slices.first().map(Ranged::range).unwrap_or_default().start(),
-                                    slices.last().map(Ranged::range).unwrap_or_default().end(),
+                                    end,
                                 ),
                                 elts: slices,
                                 ctx: ExprContext::Load,
@@ -1943,26 +2168,31 @@ impl<'src> Parser<'src> {
                 message: "empty subscript".into(),
             })));
         }
+        let first_colon_end = self.previous().range.end();
         let upper =
             if self.at(TokenKind::Colon) || self.at(TokenKind::Comma) || self.at(TokenKind::RSqb) {
                 None
             } else {
                 Some(Box::new(self.expression(0)?))
             };
-        let step = if self.eat(TokenKind::Colon) {
+        let (step, step_colon_end) = if self.eat(TokenKind::Colon) {
+            let colon_end = self.previous().range.end();
             if self.at(TokenKind::Comma) || self.at(TokenKind::RSqb) {
-                None
+                (None, Some(colon_end))
             } else {
-                Some(Box::new(self.expression(0)?))
+                (Some(Box::new(self.expression(0)?)), Some(colon_end))
             }
         } else {
-            None
+            (None, None)
         };
-        let slice_start = lower.as_ref().map(|value| value.range().start()).unwrap_or(start);
+        let slice_start =
+            lower.as_ref().map(|value| self.expression_range(value).start()).unwrap_or(start);
         let slice_end = step
             .as_ref()
-            .or(upper.as_ref())
-            .map(|value| value.range().end())
+            .map(|value| self.expression_range(value).end())
+            .or(step_colon_end)
+            .or(upper.as_ref().map(|value| self.expression_range(value).end()))
+            .or(Some(first_colon_end))
             .unwrap_or_else(|| self.previous().range.end());
         Ok(Expr::Slice(ExprSlice {
             range: TextRange::new(slice_start, slice_end),
@@ -1981,21 +2211,19 @@ impl<'src> Parser<'src> {
                 self.eat(TokenKind::Comma);
                 continue;
             } else if self.eat(TokenKind::DoubleStar) {
-                let start = self.previous().range.start();
                 let token = self.expect(TokenKind::Name)?;
                 parameters.kwarg = Some(Parameter {
-                    range: TextRange::new(start, token.range.end()),
+                    range: token.range,
                     name: normalize_identifier(self.name_text(token)),
                     annotation: None,
                     default: None,
                     type_comment: None,
                 });
             } else if self.eat(TokenKind::Star) {
-                let start = self.previous().range.start();
                 if self.at(TokenKind::Name) {
                     let token = self.bump();
                     parameters.vararg = Some(Parameter {
-                        range: TextRange::new(start, token.range.end()),
+                        range: token.range,
                         name: normalize_identifier(self.name_text(token)),
                         annotation: None,
                         default: None,
@@ -2012,10 +2240,7 @@ impl<'src> Parser<'src> {
                     None
                 };
                 let parameter = Parameter {
-                    range: TextRange::new(
-                        token.range.start(),
-                        default.as_ref().map(|v| v.range()).unwrap_or(token.range).end(),
-                    ),
+                    range: token.range,
                     name,
                     annotation: None,
                     default: default.clone(),
@@ -2238,6 +2463,58 @@ impl<'src> Parser<'src> {
         if !self.at(TokenKind::Semi) {
             self.eat(TokenKind::Newline);
         }
+    }
+
+    fn statement_end(&self, fallback: TextSize) -> TextSize {
+        self.previous().range.end().max(fallback)
+    }
+
+    fn suite_end(&self, fallback: TextSize) -> TextSize {
+        let mut position = self.position;
+        while position > 0
+            && matches!(
+                self.tokens[position - 1].kind,
+                TokenKind::Dedent | TokenKind::Newline | TokenKind::NonLogicalNewline
+            )
+        {
+            position -= 1;
+        }
+        self.tokens
+            .get(position.saturating_sub(1))
+            .filter(|token| token.kind == TokenKind::Semi)
+            .map(|token| token.range.end())
+            .unwrap_or(fallback)
+    }
+
+    fn expression_range(&self, expression: &Expr) -> TextRange {
+        self.grouped_expression_ranges
+            .get(&expression.range())
+            .copied()
+            .unwrap_or_else(|| expression.range())
+    }
+
+    fn pattern_range(&self, pattern: &Pattern) -> TextRange {
+        self.grouped_pattern_ranges
+            .get(&pattern.range())
+            .copied()
+            .unwrap_or_else(|| pattern.range())
+    }
+
+    fn trailing_type_comment(&self, offset: TextSize) -> Option<Box<str>> {
+        if !self.options.type_comments {
+            return None;
+        }
+        let offset = offset.as_usize().min(self.src.len());
+        let line_end = self.src[offset..]
+            .find(['\r', '\n'])
+            .map_or(self.src.len(), |position| offset + position);
+        let suffix = &self.src[offset..line_end];
+        let comment = suffix.split_once('#')?.1.trim();
+        let value = comment.strip_prefix("type:")?.trim();
+        if value.is_empty() || value == "ignore" {
+            return None;
+        }
+        Some(value.into())
     }
     fn error_here(&self, message: &str) -> ParseError {
         ParseError::syntax(self.current().range, message)
@@ -2568,15 +2845,29 @@ fn compare_operator(parser: &Parser<'_>, kind: TokenKind) -> Option<(CompareOper
 }
 
 fn parse_fstring(
-    _src: &str,
+    src: &str,
     range: TextRange,
     value: &str,
     raw: bool,
-    _triple: bool,
+    triple: bool,
     version: PythonVersion,
 ) -> Result<Expr, ParseError> {
+    let value_start = fstring_body_start(src, range, triple);
+    parse_fstring_value(src, range, value, raw, version, value_start)
+}
+
+fn parse_fstring_value(
+    src: &str,
+    range: TextRange,
+    value: &str,
+    raw: bool,
+    version: PythonVersion,
+    value_start: usize,
+) -> Result<Expr, ParseError> {
+    let value_start = value_start.min(src.len());
     let mut values = Vec::new();
     let mut literal = String::new();
+    let mut literal_start = 0;
     let mut index = 0;
     let bytes = value.as_bytes();
     while index < bytes.len() {
@@ -2585,22 +2876,9 @@ fn parse_fstring(
             && (raw || !is_unicode_name_brace(value, index))
         {
             if !literal.is_empty() {
-                values.push(Expr::StringLiteral(ExprString {
-                    range,
-                    value: StringLiteralValue::new(vec![StringLiteralPart {
-                        range,
-                        flags: StringFlags {
-                            prefix: Default::default(),
-                            triple: false,
-                            quote: '\'',
-                        },
-                        value: if raw {
-                            std::mem::take(&mut literal).into()
-                        } else {
-                            unescape(&std::mem::take(&mut literal)).into()
-                        },
-                    }]),
-                }));
+                let literal_range =
+                    TextRange::from_usize(value_start + literal_start, value_start + index);
+                values.push(fstring_literal(literal_range, std::mem::take(&mut literal), raw));
             }
             let start = index + 1;
             let Some(field_end) = fstring_field_end(value, start) else {
@@ -2618,10 +2896,12 @@ fn parse_fstring(
             }
             if let Some(prefix) = debug_prefix {
                 let prefix = strip_fstring_comments(prefix);
+                let prefix_range =
+                    TextRange::from_usize(value_start + start, value_start + start + prefix.len());
                 values.push(Expr::StringLiteral(ExprString {
-                    range,
+                    range: prefix_range,
                     value: StringLiteralValue::new(vec![StringLiteralPart {
-                        range,
+                        range: prefix_range,
                         flags: StringFlags {
                             prefix: Default::default(),
                             triple: false,
@@ -2631,21 +2911,37 @@ fn parse_fstring(
                     }]),
                 }));
             }
+            let expression_start = inner.find(expression_text).unwrap_or(0);
             let expression_text = normalize_fstring_expression(expression_text);
-            let expr = parse_expression(&expression_text)
+            let expression_offset = value_start + start + expression_start;
+            let expression_source =
+                format!("({}{})", " ".repeat(expression_offset.saturating_sub(1)), expression_text);
+            let expr = parse_expression(&expression_source)
                 .map_err(|error| ParseError::syntax(range, error.diagnostic.message))?;
             let conversion =
                 if debug_prefix.is_some() && conversion.is_none() { Some('r') } else { conversion };
             let format_spec = match format_spec {
-                Some(spec) => Some(Box::new(parse_fstring("", range, spec, raw, false, version)?)),
+                Some(spec) => {
+                    let spec_start = inner.find(spec).unwrap_or(inner.len());
+                    let spec_start = value_start + start + spec_start;
+                    let spec_range = TextRange::from_usize(
+                        spec_start.saturating_sub(1),
+                        value_start + field_end,
+                    );
+                    Some(Box::new(parse_fstring_value(
+                        src, spec_range, spec, raw, version, spec_start,
+                    )?))
+                }
                 None => None,
             };
+            let field_range = TextRange::from_usize(value_start + index, value_start + end);
             values.push(Expr::FormattedValue(ExprFormattedValue {
-                range,
+                range: field_range,
                 value: Box::new(expr),
                 conversion,
                 format_spec,
             }));
+            literal_start = end;
             index = end;
         } else {
             if bytes[index] == b'{' && bytes.get(index + 1) == Some(&b'{') {
@@ -2655,23 +2951,36 @@ fn parse_fstring(
                 literal.push('}');
                 index += 2;
             } else {
-                literal.push(bytes[index] as char);
-                index += 1;
+                let character = value[index..].chars().next().unwrap_or_default();
+                literal.push(character);
+                index += character.len_utf8();
             }
         }
     }
     if !literal.is_empty() {
-        values.push(Expr::StringLiteral(ExprString {
-            range,
-            value: StringLiteralValue::new(vec![StringLiteralPart {
-                range,
-                flags: StringFlags { prefix: Default::default(), triple: false, quote: '\'' },
-                value: if raw { literal.into() } else { unescape(&literal).into() },
-            }]),
-        }));
+        let literal_range =
+            TextRange::from_usize(value_start + literal_start, value_start + value.len());
+        values.push(fstring_literal(literal_range, literal, raw));
     }
-    let _ = version;
     Ok(Expr::FString(ExprFString { range, values }))
+}
+
+fn fstring_body_start(src: &str, range: TextRange, triple: bool) -> usize {
+    let start = range.start().as_usize();
+    let Some(raw) = src.get(start..range.end().as_usize()) else { return start };
+    let quote_offset = raw.find(['\'', '"']).unwrap_or(0);
+    start + quote_offset + if triple { 3 } else { 1 }
+}
+
+fn fstring_literal(range: TextRange, value: String, raw: bool) -> Expr {
+    Expr::StringLiteral(ExprString {
+        range,
+        value: StringLiteralValue::new(vec![StringLiteralPart {
+            range,
+            flags: StringFlags { prefix: Default::default(), triple: false, quote: '\'' },
+            value: if raw { value.into() } else { unescape(&value).into() },
+        }]),
+    })
 }
 
 fn strip_fstring_comments(value: &str) -> String {
@@ -2727,7 +3036,7 @@ fn fstring_field_end(value: &str, start: usize) -> Option<usize> {
             }
             _ => {}
         }
-        cursor += 1;
+        cursor += fstring_char_len(value, cursor);
     }
     None
 }
@@ -2743,7 +3052,7 @@ fn skip_fstring_string(value: &str, cursor: &mut usize) {
         if bytes[*cursor] == b'\\' {
             *cursor += 1;
             if *cursor < bytes.len() {
-                *cursor += 1;
+                *cursor += fstring_char_len(value, *cursor);
             }
             continue;
         }
@@ -2827,8 +3136,15 @@ fn split_fstring_field(field: &str) -> (&str, Option<char>, Option<&str>, Option
     let mut debug_at = None;
     let mut conversion_at = None;
     let mut format_at = None;
-    for (index, character) in field.char_indices() {
+    let mut cursor = 0;
+    while cursor < field.len() {
+        let index = cursor;
+        let character = field[index..].chars().next().unwrap_or_default();
         match character {
+            '\'' | '"' => {
+                skip_fstring_string(field, &mut cursor);
+                continue;
+            }
             '[' | '(' | '{' => nesting += 1,
             ']' | ')' | '}' => nesting = nesting.saturating_sub(1),
             '=' if nesting == 0
@@ -2851,6 +3167,7 @@ fn split_fstring_field(field: &str) -> (&str, Option<char>, Option<&str>, Option
             }
             _ => {}
         }
+        cursor += character.len_utf8();
     }
     let expression_end = debug_at.or(conversion_at).or(format_at).unwrap_or(field.len());
     let expression = field[..expression_end].trim();
@@ -2871,4 +3188,8 @@ impl FStringSuffix for str {
     fn is_empty_or_debug_suffix(&self) -> bool {
         self.is_empty() || self.starts_with(['!', ':', '#'])
     }
+}
+
+fn fstring_char_len(value: &str, cursor: usize) -> usize {
+    value[cursor..].chars().next().map_or(1, char::len_utf8)
 }

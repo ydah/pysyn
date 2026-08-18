@@ -3,23 +3,128 @@
 #![allow(missing_docs)]
 
 use crate::ast::*;
-use crate::source::TextRange;
+use crate::source::{LineIndex, TextRange};
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DumpOptions {
     pub include_attributes: bool,
     pub indent: Option<usize>,
+    source: Option<Box<str>>,
+    line_index: Option<LineIndex>,
 }
 
 impl Default for DumpOptions {
     fn default() -> Self {
-        Self { include_attributes: true, indent: Some(2) }
+        Self { include_attributes: true, indent: None, source: None, line_index: None }
+    }
+}
+
+impl DumpOptions {
+    pub fn with_attributes(include_attributes: bool) -> Self {
+        Self { include_attributes, ..Self::default() }
+    }
+
+    pub fn with_indent(mut self, indent: Option<usize>) -> Self {
+        self.indent = indent;
+        self
     }
 }
 
 pub fn dump(module: &ModModule, options: DumpOptions) -> String {
+    let mut options = options;
+    if options.include_attributes && options.source.is_none() {
+        options.source = module.source.clone();
+        options.line_index = options.source.as_deref().map(LineIndex::new);
+    }
     let mut output = String::new();
     dump_module(module, &options, 0, &mut output);
+    format_dump(output, options.indent)
+}
+
+pub fn dump_with_source(module: &ModModule, source: &str, options: DumpOptions) -> String {
+    let mut options = options;
+    options.source = Some(source.into());
+    options.line_index = Some(LineIndex::new(source));
+    let mut output = String::new();
+    dump_module(module, &options, 0, &mut output);
+    format_dump(output, options.indent)
+}
+
+fn finish_node(range: TextRange, options: &DumpOptions, output: &mut String) {
+    if options.include_attributes {
+        if let (Some(source), Some(index)) =
+            (options.source.as_deref(), options.line_index.as_ref())
+        {
+            let start = index.line_col_utf8(source, range.start());
+            let end = index.line_col_utf8(source, range.end());
+            if !output.ends_with('(') {
+                output.push_str(", ");
+            }
+            output.push_str(&format!(
+                "lineno={}, col_offset={}, end_lineno={}, end_col_offset={}",
+                start.line, start.column, end.line, end.column
+            ));
+        }
+    }
+    output.push(')');
+}
+
+fn format_dump(value: String, indent: Option<usize>) -> String {
+    let Some(width) = indent else { return value };
+    if width == 0 {
+        return value;
+    }
+    let mut output = String::with_capacity(value.len() + value.len() / 4);
+    let mut depth = 0usize;
+    let mut containers = Vec::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let characters = value.chars().collect::<Vec<_>>();
+    let mut skip_space = false;
+    for (position, character) in characters.iter().copied().enumerate() {
+        if skip_space && character == ' ' {
+            continue;
+        }
+        skip_space = false;
+        match character {
+            '\'' | '"' if !escaped => {
+                if quote == Some(character) {
+                    quote = None;
+                } else if quote.is_none() {
+                    quote = Some(character);
+                }
+                output.push(character);
+            }
+            '(' | '[' if quote.is_none() => {
+                let closing = if character == '(' { ')' } else { ']' };
+                let multiline = characters.get(position + 1) != Some(&closing);
+                output.push(character);
+                containers.push(multiline);
+                if multiline {
+                    depth += 1;
+                    output.push('\n');
+                    output.push_str(&" ".repeat(depth * width));
+                }
+            }
+            ')' | ']' if quote.is_none() => {
+                output.push(character);
+                if containers.pop().unwrap_or(false) {
+                    depth = depth.saturating_sub(1);
+                }
+            }
+            ',' if quote.is_none() && !containers.is_empty() => {
+                output.push(',');
+                output.push('\n');
+                output.push_str(&" ".repeat(depth * width));
+                skip_space = true;
+            }
+            _ => output.push(character),
+        }
+        escaped = character == '\\' && !escaped;
+        if character != '\\' {
+            escaped = false;
+        }
+    }
     output
 }
 
@@ -84,6 +189,17 @@ fn dump_module(module: &ModModule, options: &DumpOptions, level: usize, output: 
         }
         dump_stmt(statement, options, level + 1, output);
     }
+    output.push_str("], type_ignores=[");
+    for (index, type_ignore) in module.type_ignores.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        output.push_str("TypeIgnore(lineno=");
+        output.push_str(&type_ignore.lineno.to_string());
+        output.push_str(", tag=");
+        output.push_str(&repr_string(&type_ignore.tag));
+        output.push(')');
+    }
     output.push_str("])");
 }
 
@@ -119,7 +235,7 @@ fn dump_pattern_list(
     }
 }
 
-fn dump_alias_list(aliases: &[Alias], output: &mut String) {
+fn dump_alias_list(aliases: &[Alias], options: &DumpOptions, output: &mut String) {
     for (index, alias) in aliases.iter().enumerate() {
         if index > 0 {
             output.push_str(", ");
@@ -128,7 +244,7 @@ fn dump_alias_list(aliases: &[Alias], output: &mut String) {
         output.push_str(&repr_string(&alias.name));
         output.push_str(", asname=");
         dump_optional_string(alias.asname.as_deref(), output);
-        output.push(')');
+        finish_node(alias.range, options, output);
     }
 }
 
@@ -146,7 +262,7 @@ fn dump_keyword_list(
         dump_optional_string(keyword.arg.as_deref(), output);
         output.push_str(", value=");
         dump_expr(&keyword.value, options, level, output);
-        output.push(')');
+        finish_node(keyword.range, options, output);
     }
 }
 
@@ -195,13 +311,22 @@ fn dump_optional_expr(
 
 fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut String) {
     match statement {
-        Stmt::Pass(_) => output.push_str("Pass()"),
-        Stmt::Break(_) => output.push_str("Break()"),
-        Stmt::Continue(_) => output.push_str("Continue()"),
+        Stmt::Pass(node) => {
+            output.push_str("Pass(");
+            finish_node(node.range, options, output);
+        }
+        Stmt::Break(node) => {
+            output.push_str("Break(");
+            finish_node(node.range, options, output);
+        }
+        Stmt::Continue(node) => {
+            output.push_str("Continue(");
+            finish_node(node.range, options, output);
+        }
         Stmt::Expr(node) => {
             output.push_str("Expr(value=");
             dump_expr(&node.value, options, level, output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Stmt::Assign(node) => {
             output.push_str("Assign(targets=[");
@@ -210,7 +335,7 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             dump_expr(&node.value, options, level, output);
             output.push_str(", type_comment=");
             dump_optional_string(node.type_comment.as_deref(), output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Stmt::AnnAssign(node) => {
             output.push_str("AnnAssign(target=");
@@ -224,7 +349,8 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
                 output.push_str("None");
             }
             output.push_str(", simple=");
-            output.push_str(if node.simple { "1)" } else { "0)" });
+            output.push_str(if node.simple { "1" } else { "0" });
+            finish_node(node.range, options, output);
         }
         Stmt::Return(node) => {
             output.push_str("Return(value=");
@@ -233,12 +359,13 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             } else {
                 output.push_str("None");
             }
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Stmt::Delete(node) => {
             output.push_str("Delete(targets=[");
             dump_expr_list(&node.targets, options, level, output);
-            output.push_str("])");
+            output.push(']');
+            finish_node(node.range, options, output);
         }
         Stmt::If(node) => {
             output.push_str("If(test=");
@@ -247,7 +374,8 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             dump_stmt_list(&node.body, options, level, output);
             output.push_str("], orelse=[");
             dump_stmt_list(&node.orelse, options, level, output);
-            output.push_str("])");
+            output.push(']');
+            finish_node(node.range, options, output);
         }
         Stmt::While(node) => {
             output.push_str("While(test=");
@@ -256,7 +384,8 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             dump_stmt_list(&node.body, options, level, output);
             output.push_str("], orelse=[");
             dump_stmt_list(&node.orelse, options, level, output);
-            output.push_str("])");
+            output.push(']');
+            finish_node(node.range, options, output);
         }
         Stmt::For(node) | Stmt::AsyncFor(node) => {
             output.push_str(if matches!(statement, Stmt::AsyncFor(_)) {
@@ -273,7 +402,7 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             dump_stmt_list(&node.orelse, options, level, output);
             output.push_str("], type_comment=");
             dump_optional_string(node.type_comment.as_deref(), output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Stmt::FunctionDef(node) | Stmt::AsyncFunctionDef(node) => {
             output.push_str(if matches!(statement, Stmt::AsyncFunctionDef(_)) {
@@ -298,7 +427,7 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             dump_optional_string(node.type_comment.as_deref(), output);
             output.push_str(", type_params=");
             dump_type_params(&node.type_params, options, level, output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Stmt::ClassDef(node) => {
             output.push_str("ClassDef(name=");
@@ -313,7 +442,7 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             dump_expr_list(&node.decorator_list, options, level, output);
             output.push_str("], type_params=");
             dump_type_params(&node.type_params, options, level, output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Stmt::Assert(node) => {
             output.push_str("Assert(test=");
@@ -324,7 +453,7 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             } else {
                 output.push_str("None");
             }
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Stmt::Raise(node) => {
             output.push_str("Raise(exc=");
@@ -339,12 +468,13 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             } else {
                 output.push_str("None");
             }
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Stmt::Import(node) => {
             output.push_str("Import(names=[");
-            dump_alias_list(&node.names, output);
-            output.push_str("])");
+            dump_alias_list(&node.names, options, output);
+            output.push(']');
+            finish_node(node.range, options, output);
         }
         Stmt::ImportFrom(node) => {
             output.push_str("ImportFrom(module=");
@@ -354,10 +484,10 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
                 output.push_str("None");
             }
             output.push_str(", names=[");
-            dump_alias_list(&node.names, output);
+            dump_alias_list(&node.names, options, output);
             output.push_str("], level=");
             output.push_str(&node.level.to_string());
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Stmt::Global(node) => {
             output.push_str("Global(names=[");
@@ -367,7 +497,8 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
                 }
                 output.push_str(&repr_string(name));
             }
-            output.push_str("])");
+            output.push(']');
+            finish_node(node.range, options, output);
         }
         Stmt::Nonlocal(node) => {
             output.push_str("Nonlocal(names=[");
@@ -377,7 +508,8 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
                 }
                 output.push_str(&repr_string(name));
             }
-            output.push_str("])");
+            output.push(']');
+            finish_node(node.range, options, output);
         }
         Stmt::With(node) | Stmt::AsyncWith(node) => {
             output.push_str(if matches!(statement, Stmt::AsyncWith(_)) {
@@ -390,7 +522,7 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             dump_stmt_list(&node.body, options, level, output);
             output.push_str("], type_comment=");
             dump_optional_string(node.type_comment.as_deref(), output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Stmt::Try(node) | Stmt::TryStar(node) => {
             output.push_str(if matches!(statement, Stmt::TryStar(_)) {
@@ -416,13 +548,15 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
                 }
                 output.push_str(", body=[");
                 dump_stmt_list(&handler.body, options, level, output);
-                output.push_str("])");
+                output.push(']');
+                finish_node(handler.range, options, output);
             }
             output.push_str("], orelse=[");
             dump_stmt_list(&node.orelse, options, level, output);
             output.push_str("], finalbody=[");
             dump_stmt_list(&node.finalbody, options, level, output);
-            output.push_str("])");
+            output.push(']');
+            finish_node(node.range, options, output);
         }
         Stmt::AugAssign(node) => {
             output.push_str("AugAssign(target=");
@@ -431,7 +565,7 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             output.push_str(binary_name(node.op));
             output.push_str(", value=");
             dump_expr(&node.value, options, level, output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Stmt::Match(node) => {
             output.push_str("Match(subject=");
@@ -453,7 +587,8 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
                 dump_stmt_list(&case.body, options, level, output);
                 output.push_str("])");
             }
-            output.push_str("])");
+            output.push(']');
+            finish_node(node.range, options, output);
         }
         Stmt::TypeAlias(node) => {
             output.push_str("TypeAlias(name=");
@@ -462,12 +597,12 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             dump_type_params(&node.type_params, options, level, output);
             output.push_str(", value=");
             dump_expr(&node.value, options, level, output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Stmt::Invalid(node) => {
             output.push_str("Invalid(message=");
             output.push_str(&repr_string(&node.message));
-            output.push(')');
+            finish_node(node.range, options, output);
         }
     }
 }
@@ -551,7 +686,7 @@ fn dump_type_params(
         } else {
             output.push_str("None");
         }
-        output.push(')');
+        finish_node(data.range, options, output);
     }
     output.push(']');
 }
@@ -581,7 +716,7 @@ fn dump_parameter(parameter: &Parameter, options: &DumpOptions, level: usize, ou
     }
     output.push_str(", type_comment=");
     dump_optional_string(parameter.type_comment.as_deref(), output);
-    output.push(')');
+    finish_node(parameter.range, options, output);
 }
 
 fn dump_pattern(pattern: &Pattern, options: &DumpOptions, level: usize, output: &mut String) {
@@ -594,42 +729,46 @@ fn dump_pattern(pattern: &Pattern, options: &DumpOptions, level: usize, output: 
                     output.push_str(", name=");
                     output.push_str(&repr_string(name));
                 }
-                output.push(')');
+                finish_node(node.range, options, output);
             } else if let Some(name) = &node.name {
                 output.push_str("MatchAs(name=");
                 output.push_str(&repr_string(name));
-                output.push(')');
+                finish_node(node.range, options, output);
             } else {
-                output.push_str("MatchAs()");
+                output.push_str("MatchAs(");
+                finish_node(node.range, options, output);
             }
         }
         Pattern::Singleton(node) => {
             output.push_str("MatchSingleton(value=");
             dump_expr(&node.value, options, level, output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Pattern::Value(node) => {
             output.push_str("MatchValue(value=");
             dump_expr(&node.value, options, level, output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Pattern::Sequence(node) => {
             output.push_str("MatchSequence(patterns=[");
             dump_pattern_list(&node.patterns, options, level, output);
-            output.push_str("])");
+            output.push(']');
+            finish_node(node.range, options, output);
         }
         Pattern::Or(node) => {
             output.push_str("MatchOr(patterns=[");
             dump_pattern_list(&node.patterns, options, level, output);
-            output.push_str("])");
+            output.push(']');
+            finish_node(node.range, options, output);
         }
         Pattern::Star(node) => {
             if let Some(name) = &node.name {
                 output.push_str("MatchStar(name=");
                 output.push_str(&repr_string(name));
-                output.push(')');
+                finish_node(node.range, options, output);
             } else {
-                output.push_str("MatchStar()");
+                output.push_str("MatchStar(");
+                finish_node(node.range, options, output);
             }
         }
         Pattern::Mapping(node) => {
@@ -643,7 +782,7 @@ fn dump_pattern(pattern: &Pattern, options: &DumpOptions, level: usize, output: 
             } else {
                 output.push_str("None");
             }
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Pattern::Class(node) => {
             output.push_str("MatchClass(cls=");
@@ -659,9 +798,13 @@ fn dump_pattern(pattern: &Pattern, options: &DumpOptions, level: usize, output: 
             }
             output.push_str("], kwd_patterns=[");
             dump_pattern_list(&node.kwd_patterns, options, level, output);
-            output.push_str("])");
+            output.push(']');
+            finish_node(node.range, options, output);
         }
-        Pattern::Invalid(_) => output.push_str("Invalid()"),
+        Pattern::Invalid(node) => {
+            output.push_str("Invalid");
+            finish_node(node.range, options, output);
+        }
     }
 }
 
@@ -700,12 +843,12 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
             output.push_str(&repr_string(&node.id));
             output.push_str(", ctx=");
             output.push_str(context_name(node.ctx));
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Expr::NumberLiteral(node) => {
             output.push_str("Constant(value=");
             output.push_str(&number_repr(&node.value));
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Expr::StringLiteral(node) => {
             output.push_str("Constant(value=");
@@ -713,20 +856,29 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
             if node.value.parts.first().is_some_and(|part| part.flags.prefix.is_unicode()) {
                 output.push_str(", kind='u'");
             }
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Expr::BytesLiteral(node) => {
             output.push_str("Constant(value=");
             output.push_str(&repr_bytes_string(&node.value.to_str()));
-            output.push(')');
+            finish_node(node.range, options, output);
         }
-        Expr::BooleanLiteral(node) => output.push_str(if node.value {
-            "Constant(value=True)"
-        } else {
-            "Constant(value=False)"
-        }),
-        Expr::NoneLiteral(_) => output.push_str("Constant(value=None)"),
-        Expr::EllipsisLiteral(_) => output.push_str("Constant(value=Ellipsis)"),
+        Expr::BooleanLiteral(node) => {
+            output.push_str(if node.value {
+                "Constant(value=True"
+            } else {
+                "Constant(value=False"
+            });
+            finish_node(node.range, options, output);
+        }
+        Expr::NoneLiteral(node) => {
+            output.push_str("Constant(value=None");
+            finish_node(node.range, options, output);
+        }
+        Expr::EllipsisLiteral(node) => {
+            output.push_str("Constant(value=Ellipsis");
+            finish_node(node.range, options, output);
+        }
         Expr::BinOp(node) => {
             output.push_str("BinOp(left=");
             dump_expr(&node.left, options, level, output);
@@ -734,14 +886,14 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
             output.push_str(binary_name(node.op));
             output.push_str(", right=");
             dump_expr(&node.right, options, level, output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Expr::UnaryOp(node) => {
             output.push_str("UnaryOp(op=");
             output.push_str(unary_name(node.op));
             output.push_str(", operand=");
             dump_expr(&node.operand, options, level, output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Expr::BoolOp(node) => {
             output.push_str("BoolOp(op=");
@@ -756,7 +908,8 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
                 }
                 dump_expr(value, options, level, output);
             }
-            output.push_str("])");
+            output.push(']');
+            finish_node(node.range, options, output);
         }
         Expr::Compare(node) => {
             output.push_str("Compare(left=");
@@ -775,7 +928,8 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
                 }
                 dump_expr(value, options, level, output);
             }
-            output.push_str("])");
+            output.push(']');
+            finish_node(node.range, options, output);
         }
         Expr::Call(node) => {
             output.push_str("Call(func=");
@@ -784,7 +938,8 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
             dump_expr_list(&node.args, options, level, output);
             output.push_str("], keywords=[");
             dump_keyword_list(&node.keywords, options, level, output);
-            output.push_str("])");
+            output.push(']');
+            finish_node(node.range, options, output);
         }
         Expr::Attribute(node) => {
             output.push_str("Attribute(value=");
@@ -793,7 +948,7 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
             output.push_str(&repr_string(&node.attr));
             output.push_str(", ctx=");
             output.push_str(context_name(node.ctx));
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Expr::Subscript(node) => {
             output.push_str("Subscript(value=");
@@ -802,15 +957,15 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
             dump_expr(&node.slice, options, level, output);
             output.push_str(", ctx=");
             output.push_str(context_name(node.ctx));
-            output.push(')');
+            finish_node(node.range, options, output);
         }
-        Expr::List(node) => {
-            dump_sequence_with_context("List", &node.elts, node.ctx, options, level, output)
-        }
-        Expr::Tuple(node) => {
-            dump_sequence_with_context("Tuple", &node.elts, node.ctx, options, level, output)
-        }
-        Expr::Set(node) => dump_sequence("Set", &node.elts, options, level, output),
+        Expr::List(node) => dump_sequence_with_context(
+            "List", node.range, &node.elts, node.ctx, options, level, output,
+        ),
+        Expr::Tuple(node) => dump_sequence_with_context(
+            "Tuple", node.range, &node.elts, node.ctx, options, level, output,
+        ),
+        Expr::Set(node) => dump_sequence("Set", node.range, &node.elts, options, level, output),
         Expr::Dict(node) => {
             output.push_str("Dict(keys=[");
             for (index, key) in node.keys.iter().enumerate() {
@@ -830,7 +985,8 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
                 }
                 dump_expr(value, options, level, output);
             }
-            output.push_str("])");
+            output.push(']');
+            finish_node(node.range, options, output);
         }
         Expr::IfExp(node) => {
             output.push_str("IfExp(test=");
@@ -839,14 +995,14 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
             dump_expr(&node.body, options, level, output);
             output.push_str(", orelse=");
             dump_expr(&node.orelse, options, level, output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Expr::Starred(node) => {
             output.push_str("Starred(value=");
             dump_expr(&node.value, options, level, output);
             output.push_str(", ctx=");
             output.push_str(context_name(node.ctx));
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Expr::FString(node) => {
             output.push_str("JoinedStr(values=[");
@@ -856,7 +1012,8 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
                 }
                 dump_expr(value, options, level, output);
             }
-            output.push_str("])");
+            output.push(']');
+            finish_node(node.range, options, output);
         }
         Expr::FormattedValue(node) => {
             output.push_str("FormattedValue(value=");
@@ -873,50 +1030,50 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
             } else {
                 output.push_str("None");
             }
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Expr::Lambda(node) => {
             output.push_str("Lambda(args=");
             dump_parameters(&node.args, options, level, output);
             output.push_str(", body=");
             dump_expr(&node.body, options, level, output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Expr::NamedExpr(node) => {
             output.push_str("NamedExpr(target=");
             dump_expr(&node.target, options, level, output);
             output.push_str(", value=");
             dump_expr(&node.value, options, level, output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Expr::Await(node) => {
             output.push_str("Await(value=");
             dump_optional_expr(node.value.as_deref(), options, level, output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Expr::Yield(node) => {
             output.push_str("Yield(value=");
             dump_optional_expr(node.value.as_deref(), options, level, output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Expr::YieldFrom(node) => {
             output.push_str("YieldFrom(value=");
             dump_optional_expr(node.value.as_deref(), options, level, output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Expr::ListComp(node) => {
             output.push_str("ListComp(elt=");
             dump_expr(&node.elt, options, level, output);
             output.push_str(", generators=");
             dump_generators(&node.generators, options, level, output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Expr::SetComp(node) => {
             output.push_str("SetComp(elt=");
             dump_expr(&node.elt, options, level, output);
             output.push_str(", generators=");
             dump_generators(&node.generators, options, level, output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Expr::DictComp(node) => {
             output.push_str("DictComp(key=");
@@ -933,14 +1090,14 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
             }
             output.push_str(", generators=");
             dump_generators(&node.generators, options, level, output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Expr::GeneratorExp(node) => {
             output.push_str("GeneratorExp(elt=");
             dump_expr(&node.elt, options, level, output);
             output.push_str(", generators=");
             dump_generators(&node.generators, options, level, output);
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Expr::Slice(node) => {
             output.push_str("Slice(lower=");
@@ -961,12 +1118,12 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
             } else {
                 output.push_str("None");
             }
-            output.push(')');
+            finish_node(node.range, options, output);
         }
         Expr::Invalid(node) => {
             output.push_str("Invalid(message=");
             output.push_str(&repr_string(&node.message));
-            output.push(')');
+            finish_node(node.range, options, output);
         }
     }
     let _ = (options, level);
@@ -974,6 +1131,7 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
 
 fn dump_sequence(
     name: &str,
+    range: TextRange,
     values: &[Expr],
     options: &DumpOptions,
     level: usize,
@@ -987,11 +1145,13 @@ fn dump_sequence(
         }
         dump_expr(value, options, level, output);
     }
-    output.push_str("])");
+    output.push(']');
+    finish_node(range, options, output);
 }
 
 fn dump_sequence_with_context(
     name: &str,
+    range: TextRange,
     values: &[Expr],
     context: ExprContext,
     options: &DumpOptions,
@@ -1008,7 +1168,7 @@ fn dump_sequence_with_context(
     }
     output.push_str("], ctx=");
     output.push_str(context_name(context));
-    output.push(')');
+    finish_node(range, options, output);
 }
 
 fn binary_name(operator: BinaryOperator) -> &'static str {

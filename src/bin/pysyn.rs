@@ -17,10 +17,13 @@ fn main() {
         return;
     }
     let mut cpython_format = false;
+    let mut dump_attributes = true;
     let mut input = None;
     for argument in arguments {
         if argument == "--format=cpython" {
             cpython_format = true;
+        } else if argument == "--no-attributes" {
+            dump_attributes = false;
         } else if input.is_none() {
             input = Some(argument);
         }
@@ -48,7 +51,10 @@ fn main() {
             }
         }
         "parse" | "dump" => match pysyn::parse_module(&source) {
-            Ok(module) => println!("{}", pysyn::printer::dump(&module, Default::default())),
+            Ok(module) => {
+                let options = pysyn::printer::DumpOptions::with_attributes(dump_attributes);
+                println!("{}", pysyn::printer::dump(&module, options));
+            }
             Err(error) => {
                 eprintln!("{}", error.diagnostic.display_with_source("<stdin>", &source));
                 std::process::exit(1);
@@ -69,7 +75,9 @@ fn main() {
             }
         },
         _ => {
-            eprintln!("usage: pysyn [parse|tokenize|dump|unparse|check] [file|-]");
+            eprintln!(
+                "usage: pysyn [parse|tokenize|dump|unparse|check] [--no-attributes] [file|-]"
+            );
             std::process::exit(2);
         }
     }
