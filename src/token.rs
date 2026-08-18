@@ -80,6 +80,10 @@ impl StringPrefix {
     pub const fn is_bytes(self) -> bool {
         self.0 & Self::BYTES.0 != 0
     }
+    /// Unicode-string prefix flag.
+    pub const fn is_unicode(self) -> bool {
+        self.0 & Self::UNICODE.0 != 0
+    }
     /// Tests the formatted-string flag.
     pub const fn is_format(self) -> bool {
         self.0 & Self::FORMAT.0 != 0

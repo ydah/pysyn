@@ -87,6 +87,112 @@ fn dump_module(module: &ModModule, options: &DumpOptions, level: usize, output: 
     output.push_str("])");
 }
 
+fn dump_stmt_list(statements: &[Stmt], options: &DumpOptions, level: usize, output: &mut String) {
+    for (index, statement) in statements.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        dump_stmt(statement, options, level + 1, output);
+    }
+}
+
+fn dump_expr_list(expressions: &[Expr], options: &DumpOptions, level: usize, output: &mut String) {
+    for (index, expression) in expressions.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        dump_expr(expression, options, level, output);
+    }
+}
+
+fn dump_pattern_list(
+    patterns: &[Pattern],
+    options: &DumpOptions,
+    level: usize,
+    output: &mut String,
+) {
+    for (index, pattern) in patterns.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        dump_pattern(pattern, options, level, output);
+    }
+}
+
+fn dump_alias_list(aliases: &[Alias], output: &mut String) {
+    for (index, alias) in aliases.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        output.push_str("alias(name=");
+        output.push_str(&repr_string(&alias.name));
+        output.push_str(", asname=");
+        dump_optional_string(alias.asname.as_deref(), output);
+        output.push(')');
+    }
+}
+
+fn dump_keyword_list(
+    keywords: &[Keyword],
+    options: &DumpOptions,
+    level: usize,
+    output: &mut String,
+) {
+    for (index, keyword) in keywords.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        output.push_str("keyword(arg=");
+        dump_optional_string(keyword.arg.as_deref(), output);
+        output.push_str(", value=");
+        dump_expr(&keyword.value, options, level, output);
+        output.push(')');
+    }
+}
+
+fn dump_with_item_list(
+    items: &[WithItem],
+    options: &DumpOptions,
+    level: usize,
+    output: &mut String,
+) {
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        output.push_str("withitem(context_expr=");
+        dump_expr(&item.context_expr, options, level, output);
+        output.push_str(", optional_vars=");
+        if let Some(value) = &item.optional_vars {
+            dump_expr(value, options, level, output);
+        } else {
+            output.push_str("None");
+        }
+        output.push(')');
+    }
+}
+
+fn dump_optional_string(value: Option<&str>, output: &mut String) {
+    if let Some(value) = value {
+        output.push_str(&repr_string(value));
+    } else {
+        output.push_str("None");
+    }
+}
+
+fn dump_optional_expr(
+    value: Option<&Expr>,
+    options: &DumpOptions,
+    level: usize,
+    output: &mut String,
+) {
+    if let Some(value) = value {
+        dump_expr(value, options, level, output);
+    } else {
+        output.push_str("None");
+    }
+}
+
 fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut String) {
     match statement {
         Stmt::Pass(_) => output.push_str("Pass()"),
@@ -99,14 +205,11 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
         }
         Stmt::Assign(node) => {
             output.push_str("Assign(targets=[");
-            for (index, target) in node.targets.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                dump_expr(target, options, level, output);
-            }
+            dump_expr_list(&node.targets, options, level, output);
             output.push_str("], value=");
             dump_expr(&node.value, options, level, output);
+            output.push_str(", type_comment=");
+            dump_optional_string(node.type_comment.as_deref(), output);
             output.push(')');
         }
         Stmt::AnnAssign(node) => {
@@ -134,44 +237,26 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
         }
         Stmt::Delete(node) => {
             output.push_str("Delete(targets=[");
-            for (index, target) in node.targets.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                dump_expr(target, options, level, output);
-            }
+            dump_expr_list(&node.targets, options, level, output);
             output.push_str("])");
         }
         Stmt::If(node) => {
             output.push_str("If(test=");
             dump_expr(&node.test, options, level, output);
             output.push_str(", body=[");
-            for (index, child) in node.body.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                dump_stmt(child, options, level + 1, output);
-            }
+            dump_stmt_list(&node.body, options, level, output);
             output.push_str("], orelse=[");
-            for (index, child) in node.orelse.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                dump_stmt(child, options, level + 1, output);
-            }
+            dump_stmt_list(&node.orelse, options, level, output);
             output.push_str("])");
         }
         Stmt::While(node) => {
             output.push_str("While(test=");
             dump_expr(&node.test, options, level, output);
             output.push_str(", body=[");
-            for (index, child) in node.body.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                dump_stmt(child, options, level + 1, output);
-            }
-            output.push_str("], orelse=[])");
+            dump_stmt_list(&node.body, options, level, output);
+            output.push_str("], orelse=[");
+            dump_stmt_list(&node.orelse, options, level, output);
+            output.push_str("])");
         }
         Stmt::For(node) | Stmt::AsyncFor(node) => {
             output.push_str(if matches!(statement, Stmt::AsyncFor(_)) {
@@ -183,13 +268,12 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             output.push_str(", iter=");
             dump_expr(&node.iter, options, level, output);
             output.push_str(", body=[");
-            for (index, child) in node.body.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                dump_stmt(child, options, level + 1, output);
-            }
-            output.push_str("], orelse=[])");
+            dump_stmt_list(&node.body, options, level, output);
+            output.push_str("], orelse=[");
+            dump_stmt_list(&node.orelse, options, level, output);
+            output.push_str("], type_comment=");
+            dump_optional_string(node.type_comment.as_deref(), output);
+            output.push(')');
         }
         Stmt::FunctionDef(node) | Stmt::AsyncFunctionDef(node) => {
             output.push_str(if matches!(statement, Stmt::AsyncFunctionDef(_)) {
@@ -200,43 +284,36 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             output.push_str(&repr_string(&node.name));
             output.push_str(", args=");
             dump_parameters(&node.args, options, level, output);
-            output.push_str(", type_params=");
-            dump_type_params(&node.type_params, options, level, output);
             output.push_str(", body=[");
-            for (index, child) in node.body.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                dump_stmt(child, options, level + 1, output);
-            }
+            dump_stmt_list(&node.body, options, level, output);
             output.push_str("], decorator_list=[");
-            for (index, decorator) in node.decorator_list.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                dump_expr(decorator, options, level, output);
-            }
+            dump_expr_list(&node.decorator_list, options, level, output);
             output.push_str("], returns=");
             if let Some(returns) = &node.returns {
                 dump_expr(returns, options, level, output);
             } else {
                 output.push_str("None");
             }
+            output.push_str(", type_comment=");
+            dump_optional_string(node.type_comment.as_deref(), output);
+            output.push_str(", type_params=");
+            dump_type_params(&node.type_params, options, level, output);
             output.push(')');
         }
         Stmt::ClassDef(node) => {
             output.push_str("ClassDef(name=");
             output.push_str(&repr_string(&node.name));
-            output.push_str(", type_params=");
+            output.push_str(", bases=[");
+            dump_expr_list(&node.bases, options, level, output);
+            output.push_str("], keywords=[");
+            dump_keyword_list(&node.keywords, options, level, output);
+            output.push_str("], body=[");
+            dump_stmt_list(&node.body, options, level, output);
+            output.push_str("], decorator_list=[");
+            dump_expr_list(&node.decorator_list, options, level, output);
+            output.push_str("], type_params=");
             dump_type_params(&node.type_params, options, level, output);
-            output.push_str(", body=[");
-            for (index, child) in node.body.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                dump_stmt(child, options, level + 1, output);
-            }
-            output.push_str("])");
+            output.push(')');
         }
         Stmt::Assert(node) => {
             output.push_str("Assert(test=");
@@ -266,14 +343,7 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
         }
         Stmt::Import(node) => {
             output.push_str("Import(names=[");
-            for (index, alias) in node.names.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                output.push_str("alias(name=");
-                output.push_str(&repr_string(&alias.name));
-                output.push(')');
-            }
+            dump_alias_list(&node.names, output);
             output.push_str("])");
         }
         Stmt::ImportFrom(node) => {
@@ -283,7 +353,11 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             } else {
                 output.push_str("None");
             }
-            output.push_str(", names=[])");
+            output.push_str(", names=[");
+            dump_alias_list(&node.names, output);
+            output.push_str("], level=");
+            output.push_str(&node.level.to_string());
+            output.push(')');
         }
         Stmt::Global(node) => {
             output.push_str("Global(names=[");
@@ -311,15 +385,12 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             } else {
                 "With(items=["
             });
-            for (index, item) in node.items.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                output.push_str("withitem(context_expr=");
-                dump_expr(&item.context_expr, options, level, output);
-                output.push_str(", optional_vars=None)");
-            }
-            output.push_str("], body=[])");
+            dump_with_item_list(&node.items, options, level, output);
+            output.push_str("], body=[");
+            dump_stmt_list(&node.body, options, level, output);
+            output.push_str("], type_comment=");
+            dump_optional_string(node.type_comment.as_deref(), output);
+            output.push(')');
         }
         Stmt::Try(node) | Stmt::TryStar(node) => {
             output.push_str(if matches!(statement, Stmt::TryStar(_)) {
@@ -327,12 +398,7 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             } else {
                 "Try(body=["
             });
-            for (index, child) in node.body.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                dump_stmt(child, options, level + 1, output);
-            }
+            dump_stmt_list(&node.body, options, level, output);
             output.push_str("], handlers=[");
             for (index, handler) in node.handlers.iter().enumerate() {
                 if index > 0 {
@@ -344,35 +410,18 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
                 } else {
                     output.push_str("None");
                 }
-                output.push_str(", name=");
                 if let Some(name) = &handler.name {
+                    output.push_str(", name=");
                     output.push_str(&repr_string(name));
-                } else {
-                    output.push_str("None");
                 }
                 output.push_str(", body=[");
-                for (child_index, child) in handler.body.iter().enumerate() {
-                    if child_index > 0 {
-                        output.push_str(", ");
-                    }
-                    dump_stmt(child, options, level + 1, output);
-                }
+                dump_stmt_list(&handler.body, options, level, output);
                 output.push_str("])");
             }
             output.push_str("], orelse=[");
-            for (index, child) in node.orelse.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                dump_stmt(child, options, level + 1, output);
-            }
+            dump_stmt_list(&node.orelse, options, level, output);
             output.push_str("], finalbody=[");
-            for (index, child) in node.finalbody.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                dump_stmt(child, options, level + 1, output);
-            }
+            dump_stmt_list(&node.finalbody, options, level, output);
             output.push_str("])");
         }
         Stmt::AugAssign(node) => {
@@ -401,12 +450,7 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
                     output.push_str("None");
                 }
                 output.push_str(", body=[");
-                for (child_index, child) in case.body.iter().enumerate() {
-                    if child_index > 0 {
-                        output.push_str(", ");
-                    }
-                    dump_stmt(child, options, level + 1, output);
-                }
+                dump_stmt_list(&case.body, options, level, output);
                 output.push_str("])");
             }
             output.push_str("])");
@@ -420,7 +464,11 @@ fn dump_stmt(statement: &Stmt, options: &DumpOptions, level: usize, output: &mut
             dump_expr(&node.value, options, level, output);
             output.push(')');
         }
-        Stmt::Invalid(_) => output.push_str("Invalid()"),
+        Stmt::Invalid(node) => {
+            output.push_str("Invalid(message=");
+            output.push_str(&repr_string(&node.message));
+            output.push(')');
+        }
     }
 }
 
@@ -531,25 +579,29 @@ fn dump_parameter(parameter: &Parameter, options: &DumpOptions, level: usize, ou
     } else {
         output.push_str("None");
     }
-    output.push_str(", type_comment=None)");
+    output.push_str(", type_comment=");
+    dump_optional_string(parameter.type_comment.as_deref(), output);
+    output.push(')');
 }
 
 fn dump_pattern(pattern: &Pattern, options: &DumpOptions, level: usize, output: &mut String) {
     match pattern {
         Pattern::As(node) => {
-            output.push_str("MatchAs(name=");
-            if let Some(name) = &node.name {
-                output.push_str(&repr_string(name));
-            } else {
-                output.push_str("None");
-            }
-            output.push_str(", pattern=");
             if let Some(pattern) = &node.pattern {
+                output.push_str("MatchAs(pattern=");
                 dump_pattern(pattern, options, level, output);
+                if let Some(name) = &node.name {
+                    output.push_str(", name=");
+                    output.push_str(&repr_string(name));
+                }
+                output.push(')');
+            } else if let Some(name) = &node.name {
+                output.push_str("MatchAs(name=");
+                output.push_str(&repr_string(name));
+                output.push(')');
             } else {
-                output.push_str("None");
+                output.push_str("MatchAs()");
             }
-            output.push(')');
         }
         Pattern::Singleton(node) => {
             output.push_str("MatchSingleton(value=");
@@ -563,49 +615,29 @@ fn dump_pattern(pattern: &Pattern, options: &DumpOptions, level: usize, output: 
         }
         Pattern::Sequence(node) => {
             output.push_str("MatchSequence(patterns=[");
-            for (index, child) in node.patterns.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                dump_pattern(child, options, level, output);
-            }
+            dump_pattern_list(&node.patterns, options, level, output);
             output.push_str("])");
         }
         Pattern::Or(node) => {
             output.push_str("MatchOr(patterns=[");
-            for (index, child) in node.patterns.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                dump_pattern(child, options, level, output);
-            }
+            dump_pattern_list(&node.patterns, options, level, output);
             output.push_str("])");
         }
         Pattern::Star(node) => {
-            output.push_str("MatchStar(name=");
             if let Some(name) = &node.name {
+                output.push_str("MatchStar(name=");
                 output.push_str(&repr_string(name));
+                output.push(')');
             } else {
-                output.push_str("None");
+                output.push_str("MatchStar()");
             }
-            output.push(')');
         }
         Pattern::Mapping(node) => {
             output.push_str("MatchMapping(keys=[");
-            for (index, key) in node.keys.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                dump_expr(key, options, level, output);
-            }
+            dump_expr_list(&node.keys, options, level, output);
             output.push_str("], patterns=[");
-            for (index, pattern) in node.patterns.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                dump_pattern(pattern, options, level, output);
-            }
-            output.push_str(", rest=");
+            dump_pattern_list(&node.patterns, options, level, output);
+            output.push_str("], rest=");
             if let Some(rest) = &node.rest {
                 output.push_str(&repr_string(rest));
             } else {
@@ -617,12 +649,7 @@ fn dump_pattern(pattern: &Pattern, options: &DumpOptions, level: usize, output: 
             output.push_str("MatchClass(cls=");
             dump_expr(&node.cls, options, level, output);
             output.push_str(", patterns=[");
-            for (index, pattern) in node.patterns.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                dump_pattern(pattern, options, level, output);
-            }
+            dump_pattern_list(&node.patterns, options, level, output);
             output.push_str("], kwd_attrs=[");
             for (index, attr) in node.kwd_attrs.iter().enumerate() {
                 if index > 0 {
@@ -631,12 +658,7 @@ fn dump_pattern(pattern: &Pattern, options: &DumpOptions, level: usize, output: 
                 output.push_str(&repr_string(attr));
             }
             output.push_str("], kwd_patterns=[");
-            for (index, pattern) in node.kwd_patterns.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                dump_pattern(pattern, options, level, output);
-            }
+            dump_pattern_list(&node.kwd_patterns, options, level, output);
             output.push_str("])");
         }
         Pattern::Invalid(_) => output.push_str("Invalid()"),
@@ -688,12 +710,14 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
         Expr::StringLiteral(node) => {
             output.push_str("Constant(value=");
             output.push_str(&repr_string(&node.value.to_str()));
+            if node.value.parts.first().is_some_and(|part| part.flags.prefix.is_unicode()) {
+                output.push_str(", kind='u'");
+            }
             output.push(')');
         }
         Expr::BytesLiteral(node) => {
             output.push_str("Constant(value=");
-            output.push('b');
-            output.push_str(&repr_string(&node.value.to_str()));
+            output.push_str(&repr_bytes_string(&node.value.to_str()));
             output.push(')');
         }
         Expr::BooleanLiteral(node) => output.push_str(if node.value {
@@ -757,13 +781,10 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
             output.push_str("Call(func=");
             dump_expr(&node.func, options, level, output);
             output.push_str(", args=[");
-            for (index, value) in node.args.iter().enumerate() {
-                if index > 0 {
-                    output.push_str(", ");
-                }
-                dump_expr(value, options, level, output);
-            }
-            output.push_str("], keywords=[])");
+            dump_expr_list(&node.args, options, level, output);
+            output.push_str("], keywords=[");
+            dump_keyword_list(&node.keywords, options, level, output);
+            output.push_str("])");
         }
         Expr::Attribute(node) => {
             output.push_str("Attribute(value=");
@@ -854,11 +875,35 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
             }
             output.push(')');
         }
-        Expr::Lambda(_) => output.push_str("Lambda()"),
-        Expr::NamedExpr(_) => output.push_str("NamedExpr()"),
-        Expr::Await(_) => output.push_str("Await()"),
-        Expr::Yield(_) => output.push_str("Yield()"),
-        Expr::YieldFrom(_) => output.push_str("YieldFrom()"),
+        Expr::Lambda(node) => {
+            output.push_str("Lambda(args=");
+            dump_parameters(&node.args, options, level, output);
+            output.push_str(", body=");
+            dump_expr(&node.body, options, level, output);
+            output.push(')');
+        }
+        Expr::NamedExpr(node) => {
+            output.push_str("NamedExpr(target=");
+            dump_expr(&node.target, options, level, output);
+            output.push_str(", value=");
+            dump_expr(&node.value, options, level, output);
+            output.push(')');
+        }
+        Expr::Await(node) => {
+            output.push_str("Await(value=");
+            dump_optional_expr(node.value.as_deref(), options, level, output);
+            output.push(')');
+        }
+        Expr::Yield(node) => {
+            output.push_str("Yield(value=");
+            dump_optional_expr(node.value.as_deref(), options, level, output);
+            output.push(')');
+        }
+        Expr::YieldFrom(node) => {
+            output.push_str("YieldFrom(value=");
+            dump_optional_expr(node.value.as_deref(), options, level, output);
+            output.push(')');
+        }
         Expr::ListComp(node) => {
             output.push_str("ListComp(elt=");
             dump_expr(&node.elt, options, level, output);
@@ -918,7 +963,11 @@ fn dump_expr(expression: &Expr, options: &DumpOptions, level: usize, output: &mu
             }
             output.push(')');
         }
-        Expr::Invalid(_) => output.push_str("Invalid()"),
+        Expr::Invalid(node) => {
+            output.push_str("Invalid(message=");
+            output.push_str(&repr_string(&node.message));
+            output.push(')');
+        }
     }
     let _ = (options, level);
 }
@@ -1013,7 +1062,15 @@ fn number_repr(number: &Number) -> String {
         Number::Int(value) => value.to_string(),
         Number::Float(value) => pyrepr_float(*value),
         Number::Complex { real, imag } => {
-            format!("({}+{}j)", pyrepr_float(*real), pyrepr_float(*imag))
+            if *real == 0.0 {
+                let mut value = pyrepr_float(*imag);
+                if value.ends_with(".0") {
+                    value.truncate(value.len() - 2);
+                }
+                format!("{value}j")
+            } else {
+                format!("({}+{}j)", pyrepr_float(*real), pyrepr_float(*imag))
+            }
         }
     }
 }
@@ -1031,7 +1088,39 @@ fn repr_string(value: &str) -> String {
             '\n' => output.push_str("\\n"),
             '\r' => output.push_str("\\r"),
             '\t' => output.push_str("\\t"),
+            other if other.is_control() => {
+                let code = other as u32;
+                if code <= 0xff {
+                    output.push_str(&format!("\\x{code:02x}"));
+                } else if code <= 0xffff {
+                    output.push_str(&format!("\\u{code:04x}"));
+                } else {
+                    output.push_str(&format!("\\U{code:08x}"));
+                }
+            }
             other => output.push(other),
+        }
+    }
+    output.push(quote);
+    output
+}
+
+fn repr_bytes_string(value: &str) -> String {
+    let quote = if value.contains('\'') && !value.contains('"') { '"' } else { '\'' };
+    let mut output = String::from("b");
+    output.push(quote);
+    for character in value.chars() {
+        match character {
+            '\\' => output.push_str("\\\\"),
+            character if character == quote => {
+                output.push('\\');
+                output.push(character);
+            }
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            other if other.is_ascii() && !other.is_ascii_control() => output.push(other),
+            other => output.push_str(&format!("\\x{code:02x}", code = other as u32 & 0xff)),
         }
     }
     output.push(quote);
@@ -1084,16 +1173,38 @@ impl Unparser {
                     .map(|target| self.expression(target))
                     .collect::<Vec<_>>()
                     .join(" = ");
-                self.line(&format!("{targets} = {}", self.expression(&node.value)));
+                self.line(&format!(
+                    "{targets} = {}{}",
+                    self.expression(&node.value),
+                    type_comment_suffix(node.type_comment.as_deref())
+                ));
             }
+            Stmt::Delete(node) => self.line(&format!(
+                "del {}",
+                node.targets
+                    .iter()
+                    .map(|target| self.expression(target))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
             Stmt::AnnAssign(node) => self.line(&format!(
                 "{}: {}{}",
-                self.expression(&node.target),
+                if !node.simple && matches!(node.target.as_ref(), Expr::Name(_)) {
+                    format!("({})", self.expression(&node.target))
+                } else {
+                    self.expression(&node.target)
+                },
                 self.expression(&node.annotation),
                 node.value
                     .as_ref()
                     .map(|value| format!(" = {}", self.expression(value)))
                     .unwrap_or_default()
+            )),
+            Stmt::AugAssign(node) => self.line(&format!(
+                "{} {}= {}",
+                self.expression(&node.target),
+                binary_text(node.op),
+                self.expression(&node.value)
             )),
             Stmt::Return(node) => self.line(&format!(
                 "return{}",
@@ -1123,21 +1234,19 @@ impl Unparser {
             )),
             Stmt::Import(node) => self.line(&format!(
                 "import {}",
-                node.names
-                    .iter()
-                    .map(|alias| alias.name.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                node.names.iter().map(alias_text).collect::<Vec<_>>().join(", ")
             )),
-            Stmt::ImportFrom(node) => self.line(&format!(
-                "from {} import {}",
-                node.module.as_deref().unwrap_or("."),
-                node.names
-                    .iter()
-                    .map(|alias| alias.name.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )),
+            Stmt::ImportFrom(node) => {
+                let module = format!(
+                    "{}{}",
+                    ".".repeat(node.level as usize),
+                    node.module.as_deref().unwrap_or("")
+                );
+                self.line(&format!(
+                    "from {module} import {}",
+                    node.names.iter().map(alias_text).collect::<Vec<_>>().join(", ")
+                ))
+            }
             Stmt::Global(node) => self.line(&format!(
                 "global {}",
                 node.names.iter().map(|name| name.as_ref()).collect::<Vec<_>>().join(", ")
@@ -1146,20 +1255,7 @@ impl Unparser {
                 "nonlocal {}",
                 node.names.iter().map(|name| name.as_ref()).collect::<Vec<_>>().join(", ")
             )),
-            Stmt::If(node) => {
-                self.block_header(&format!("if {}:", self.expression(&node.test)), &node.body);
-                for child in &node.orelse {
-                    if let Stmt::If(nested) = child {
-                        self.block_header(
-                            &format!("elif {}:", self.expression(&nested.test)),
-                            &nested.body,
-                        );
-                    } else {
-                        self.block_header("else:", &node.orelse);
-                        break;
-                    }
-                }
-            }
+            Stmt::If(node) => self.if_statement(node),
             Stmt::While(node) => {
                 self.block_header(&format!("while {}:", self.expression(&node.test)), &node.body);
                 if !node.orelse.is_empty() {
@@ -1170,9 +1266,10 @@ impl Unparser {
                 let prefix = if matches!(statement, Stmt::AsyncFor(_)) { "async " } else { "" };
                 self.block_header(
                     &format!(
-                        "{prefix}for {} in {}:",
+                        "{prefix}for {} in {}:{}",
                         self.expression(&node.target),
-                        self.expression(&node.iter)
+                        self.expression(&node.iter),
+                        type_comment_suffix(node.type_comment.as_deref())
                     ),
                     &node.body,
                 );
@@ -1197,9 +1294,37 @@ impl Unparser {
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
-                self.block_header(&format!("{prefix}with {items}:"), &node.body);
+                self.block_header(
+                    &format!(
+                        "{prefix}with {items}:{}",
+                        type_comment_suffix(node.type_comment.as_deref())
+                    ),
+                    &node.body,
+                );
+            }
+            Stmt::Try(node) | Stmt::TryStar(node) => {
+                self.try_statement(node, matches!(statement, Stmt::TryStar(_)))
+            }
+            Stmt::Match(node) => {
+                self.line(&format!("match {}:", self.expression(&node.subject)));
+                self.indent += 1;
+                for case in &node.cases {
+                    let guard = case
+                        .guard
+                        .as_ref()
+                        .map(|value| format!(" if {}", self.expression(value)))
+                        .unwrap_or_default();
+                    self.line(&format!("case {}{}:", self.pattern(&case.pattern), guard));
+                    self.indent += 1;
+                    self.statements_or_pass(&case.body);
+                    self.indent = self.indent.saturating_sub(1);
+                }
+                self.indent = self.indent.saturating_sub(1);
             }
             Stmt::FunctionDef(node) | Stmt::AsyncFunctionDef(node) => {
+                for decorator in &node.decorator_list {
+                    self.line(&format!("@{}", self.expression(decorator)));
+                }
                 let prefix =
                     if matches!(statement, Stmt::AsyncFunctionDef(_)) { "async " } else { "" };
                 let returns = node
@@ -1209,16 +1334,20 @@ impl Unparser {
                     .unwrap_or_default();
                 self.block_header(
                     &format!(
-                        "{prefix}def {}{}({}){}:",
+                        "{prefix}def {}{}({}){}:{}",
                         node.name,
                         self.type_parameters(&node.type_params),
                         self.parameters(&node.args),
-                        returns
+                        returns,
+                        type_comment_suffix(node.type_comment.as_deref())
                     ),
                     &node.body,
                 );
             }
             Stmt::ClassDef(node) => {
+                for decorator in &node.decorator_list {
+                    self.line(&format!("@{}", self.expression(decorator)));
+                }
                 let bases = node
                     .bases
                     .iter()
@@ -1255,15 +1384,80 @@ impl Unparser {
                     self.expression(&node.value)
                 ));
             }
-            _ => self.line("pass"),
+            Stmt::Invalid(node) => self.line(&format!("# invalid statement: {}", node.message)),
+        }
+    }
+    fn if_statement(&mut self, node: &StmtIf) {
+        self.line(&format!("if {}:", self.expression(&node.test)));
+        self.indent += 1;
+        self.statements_or_pass(&node.body);
+        self.indent = self.indent.saturating_sub(1);
+        self.if_orelse(&node.orelse);
+    }
+    fn if_orelse(&mut self, orelse: &[Stmt]) {
+        if orelse.is_empty() {
+            return;
+        }
+        if orelse.len() == 1 {
+            if let Stmt::If(node) = &orelse[0] {
+                self.line(&format!("elif {}:", self.expression(&node.test)));
+                self.indent += 1;
+                self.statements_or_pass(&node.body);
+                self.indent = self.indent.saturating_sub(1);
+                self.if_orelse(&node.orelse);
+                return;
+            }
+        }
+        self.line("else:");
+        self.indent += 1;
+        self.statements_or_pass(orelse);
+        self.indent = self.indent.saturating_sub(1);
+    }
+    fn try_statement(&mut self, node: &StmtTry, is_star: bool) {
+        self.line("try:");
+        self.indent += 1;
+        self.statements_or_pass(&node.body);
+        self.indent = self.indent.saturating_sub(1);
+        for handler in &node.handlers {
+            let prefix = if is_star { "except*" } else { "except" };
+            let exception = handler
+                .typ
+                .as_ref()
+                .map(|value| format!(" {}", self.expression(value)))
+                .unwrap_or_default();
+            let name =
+                handler.name.as_ref().map(|value| format!(" as {value}")).unwrap_or_default();
+            self.line(&format!("{prefix}{exception}{name}:"));
+            self.indent += 1;
+            self.statements_or_pass(&handler.body);
+            self.indent = self.indent.saturating_sub(1);
+        }
+        if !node.orelse.is_empty() {
+            self.line("else:");
+            self.indent += 1;
+            self.statements_or_pass(&node.orelse);
+            self.indent = self.indent.saturating_sub(1);
+        }
+        if !node.finalbody.is_empty() {
+            self.line("finally:");
+            self.indent += 1;
+            self.statements_or_pass(&node.finalbody);
+            self.indent = self.indent.saturating_sub(1);
+        }
+    }
+    fn statements_or_pass(&mut self, statements: &[Stmt]) {
+        if statements.is_empty() {
+            self.line("pass");
+            return;
+        }
+        for statement in statements {
+            self.statement(statement);
         }
     }
     fn block_header(&mut self, header: &str, body: &[Stmt]) {
         self.line(header);
         self.indent += 1;
-        for statement in body {
-            self.statement(statement);
-        }
+        self.statements_or_pass(body);
         self.indent = self.indent.saturating_sub(1);
     }
     fn line(&mut self, value: &str) {
@@ -1333,35 +1527,66 @@ impl Unparser {
         match expression {
             Expr::Name(node) => node.id.to_string(),
             Expr::NumberLiteral(node) => node.raw.to_string(),
-            Expr::StringLiteral(node) => repr_string(&node.value.to_str()),
-            Expr::BytesLiteral(node) => format!("b{}", repr_string(&node.value.to_str())),
-            Expr::BooleanLiteral(node) => node.value.to_string(),
+            Expr::StringLiteral(node) => {
+                let prefix = if node
+                    .value
+                    .parts
+                    .first()
+                    .is_some_and(|part| part.flags.prefix.is_unicode())
+                {
+                    "u"
+                } else {
+                    ""
+                };
+                format!("{prefix}{}", repr_string(&node.value.to_str()))
+            }
+            Expr::BytesLiteral(node) => repr_bytes_string(&node.value.to_str()),
+            Expr::BooleanLiteral(node) => {
+                if node.value {
+                    "True".into()
+                } else {
+                    "False".into()
+                }
+            }
             Expr::NoneLiteral(_) => "None".into(),
             Expr::EllipsisLiteral(_) => "...".into(),
-            Expr::Attribute(node) => format!("{}.{}", self.expression(&node.value), node.attr),
+            Expr::Attribute(node) => {
+                let value = match node.value.as_ref() {
+                    Expr::NumberLiteral(_) => format!("({})", self.expression(&node.value)),
+                    _ => self.expression(&node.value),
+                };
+                format!("{value}.{}", node.attr)
+            }
             Expr::Call(node) => format!(
                 "{}({})",
                 self.expression(&node.func),
-                node.args.iter().map(|arg| self.expression(arg)).collect::<Vec<_>>().join(", ")
+                node.args
+                    .iter()
+                    .map(|arg| self.expression(arg))
+                    .chain(node.keywords.iter().map(|keyword| self.keyword(keyword)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             Expr::Subscript(node) => {
-                format!("{}[{}]", self.expression(&node.value), self.expression(&node.slice))
+                format!("{}[{}]", self.expression(&node.value), self.subscript_slice(&node.slice))
             }
             Expr::BinOp(node) => format!(
-                "{} {} {}",
+                "({} {} {})",
                 self.expression(&node.left),
                 binary_text(node.op),
                 self.expression(&node.right)
             ),
             Expr::UnaryOp(node) => {
-                format!("{}{}", unary_text(node.op), self.expression(&node.operand))
+                format!("({}{})", unary_text(node.op), self.expression(&node.operand))
             }
-            Expr::BoolOp(node) => node
-                .values
-                .iter()
-                .map(|value| self.expression(value))
-                .collect::<Vec<_>>()
-                .join(if node.op == BoolOperator::And { " and " } else { " or " }),
+            Expr::BoolOp(node) => format!(
+                "({})",
+                node.values
+                    .iter()
+                    .map(|value| self.expression(value))
+                    .collect::<Vec<_>>()
+                    .join(if node.op == BoolOperator::And { " and " } else { " or " })
+            ),
             Expr::Compare(node) => {
                 let mut result = self.expression(&node.left);
                 for (op, value) in node.ops.iter().zip(&node.comparators) {
@@ -1370,45 +1595,219 @@ impl Unparser {
                     result.push(' ');
                     result.push_str(&self.expression(value));
                 }
-                result
+                format!("({result})")
             }
             Expr::List(node) => format!(
                 "[{}]",
                 node.elts.iter().map(|value| self.expression(value)).collect::<Vec<_>>().join(", ")
             ),
-            Expr::Tuple(node) => format!(
-                "({})",
-                node.elts.iter().map(|value| self.expression(value)).collect::<Vec<_>>().join(", ")
-            ),
+            Expr::Tuple(node) => {
+                let values =
+                    node.elts.iter().map(|value| self.expression(value)).collect::<Vec<_>>();
+                match values.len() {
+                    0 => "()".into(),
+                    1 => format!("({},)", values[0]),
+                    _ => format!("({})", values.join(", ")),
+                }
+            }
             Expr::Set(node) => format!(
                 "{{{}}}",
                 node.elts.iter().map(|value| self.expression(value)).collect::<Vec<_>>().join(", ")
             ),
-            Expr::Dict(node) => format!(
-                "{{{}}}",
-                node.keys
-                    .iter()
-                    .zip(&node.values)
-                    .map(|(key, value)| {
-                        if let Some(key) = key {
-                            format!("{}: {}", self.expression(key), self.expression(value))
-                        } else {
-                            format!("**{}", self.expression(value))
+            Expr::Dict(node) => {
+                let count = node.keys.len().max(node.values.len());
+                let values = (0..count)
+                    .map(|index| {
+                        let key = node.keys.get(index).and_then(Option::as_ref);
+                        let value = node.values.get(index);
+                        match (key, value) {
+                            (Some(key), Some(value)) => {
+                                format!("{}: {}", self.expression(key), self.expression(value))
+                            }
+                            (None, Some(value)) => format!("**{}", self.expression(value)),
+                            (Some(key), None) => format!("{}: None", self.expression(key)),
+                            (None, None) => String::new(),
                         }
                     })
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+                    .filter(|value| !value.is_empty())
+                    .collect::<Vec<_>>();
+                format!("{{{}}}", values.join(", "))
+            }
             Expr::IfExp(node) => format!(
-                "{} if {} else {}",
+                "({} if {} else {})",
                 self.expression(&node.body),
                 self.expression(&node.test),
                 self.expression(&node.orelse)
             ),
+            Expr::Lambda(node) => {
+                format!("(lambda {}: {})", self.parameters(&node.args), self.expression(&node.body))
+            }
+            Expr::NamedExpr(node) => {
+                format!("({} := {})", self.expression(&node.target), self.expression(&node.value))
+            }
+            Expr::Await(node) => format!(
+                "(await {})",
+                node.value.as_ref().map(|value| self.expression(value)).unwrap_or_default()
+            ),
+            Expr::Yield(node) => match &node.value {
+                Some(value) => format!("(yield {})", self.expression(value)),
+                None => "(yield)".into(),
+            },
+            Expr::YieldFrom(node) => match &node.value {
+                Some(value) => format!("(yield from {})", self.expression(value)),
+                None => "(yield from)".into(),
+            },
+            Expr::ListComp(node) => {
+                format!("[{}{}]", self.expression(&node.elt), self.comprehensions(&node.generators))
+            }
+            Expr::SetComp(node) => {
+                format!(
+                    "{{{}{}}}",
+                    self.expression(&node.elt),
+                    self.comprehensions(&node.generators)
+                )
+            }
+            Expr::DictComp(node) => {
+                let key = node.key.as_ref().map(|value| self.expression(value)).unwrap_or_default();
+                let value = node
+                    .value
+                    .as_ref()
+                    .map(|value| self.expression(value))
+                    .unwrap_or_else(|| self.expression(&node.elt));
+                format!("{{{key}: {value}{}}}", self.comprehensions(&node.generators))
+            }
+            Expr::GeneratorExp(node) => {
+                format!("({}{})", self.expression(&node.elt), self.comprehensions(&node.generators))
+            }
+            Expr::Slice(node) => format!(
+                "{}:{}{}",
+                node.lower.as_ref().map(|value| self.expression(value)).unwrap_or_default(),
+                node.upper.as_ref().map(|value| self.expression(value)).unwrap_or_default(),
+                node.step
+                    .as_ref()
+                    .map(|value| format!(":{}", self.expression(value)))
+                    .unwrap_or_default()
+            ),
             Expr::FString(node) => format!("f\"{}\"", self.fstring_text(&node.values)),
-            Expr::FormattedValue(node) => format!("{{{}}}", self.expression(&node.value)),
+            Expr::FormattedValue(node) => {
+                let conversion =
+                    node.conversion.map(|value| format!("!{value}")).unwrap_or_default();
+                let spec = node
+                    .format_spec
+                    .as_ref()
+                    .map(|value| format!(":{}", self.expression(value)))
+                    .unwrap_or_default();
+                format!("{{{}{conversion}{spec}}}", self.expression(&node.value))
+            }
             Expr::Starred(node) => format!("*{}", self.expression(&node.value)),
-            _ => "...".into(),
+            Expr::Invalid(node) => format!("__pysyn_invalid__({})", repr_string(&node.message)),
+        }
+    }
+
+    fn keyword(&self, keyword: &Keyword) -> String {
+        match &keyword.arg {
+            Some(arg) => format!("{arg}={}", self.expression(&keyword.value)),
+            None => format!("**{}", self.expression(&keyword.value)),
+        }
+    }
+
+    fn subscript_slice(&self, slice: &Expr) -> String {
+        match slice {
+            Expr::Tuple(node) if node.elts.is_empty() => "()".into(),
+            Expr::Tuple(node) => {
+                let values =
+                    node.elts.iter().map(|value| self.expression(value)).collect::<Vec<_>>();
+                if values.len() == 1 {
+                    format!("{},", values[0])
+                } else {
+                    values.join(", ")
+                }
+            }
+            other => self.expression(other),
+        }
+    }
+
+    fn comprehensions(&self, generators: &[Comprehension]) -> String {
+        generators
+            .iter()
+            .map(|generator| {
+                let prefix = if generator.is_async { " async for " } else { " for " };
+                let conditions = generator
+                    .ifs
+                    .iter()
+                    .map(|condition| format!(" if {}", self.expression(condition)))
+                    .collect::<String>();
+                format!(
+                    "{prefix}{} in {}{conditions}",
+                    self.expression(&generator.target),
+                    self.expression(&generator.iter)
+                )
+            })
+            .collect()
+    }
+
+    fn pattern(&self, pattern: &Pattern) -> String {
+        match pattern {
+            Pattern::Value(node) => self.pattern_value_expression(&node.value),
+            Pattern::Singleton(node) => self.expression(&node.value),
+            Pattern::Sequence(node) => format!(
+                "[{}]",
+                node.patterns
+                    .iter()
+                    .map(|pattern| self.pattern(pattern))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Pattern::Mapping(node) => {
+                let mut values = node
+                    .keys
+                    .iter()
+                    .zip(&node.patterns)
+                    .map(|(key, pattern)| {
+                        format!("{}: {}", self.pattern_value_expression(key), self.pattern(pattern))
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(rest) = &node.rest {
+                    values.push(format!("**{rest}"));
+                }
+                format!("{{{}}}", values.join(", "))
+            }
+            Pattern::Class(node) => {
+                let positional = node.patterns.iter().map(|pattern| self.pattern(pattern));
+                let keyword = node
+                    .kwd_attrs
+                    .iter()
+                    .zip(&node.kwd_patterns)
+                    .map(|(attr, pattern)| format!("{attr}={}", self.pattern(pattern)));
+                format!(
+                    "{}({})",
+                    self.expression(&node.cls),
+                    positional.chain(keyword).collect::<Vec<_>>().join(", ")
+                )
+            }
+            Pattern::Star(node) => format!("*{}", node.name.as_deref().unwrap_or("_")),
+            Pattern::As(node) => match (node.pattern.as_deref(), node.name.as_deref()) {
+                (None, Some(name)) => name.into(),
+                (None, None) => "_".into(),
+                (Some(pattern), Some(name)) => {
+                    let value = self.pattern(pattern);
+                    if matches!(pattern, Pattern::As(_)) {
+                        format!("({value}) as {name}")
+                    } else {
+                        format!("{value} as {name}")
+                    }
+                }
+                (Some(pattern), None) => self.pattern(pattern),
+            },
+            Pattern::Or(node) => format!(
+                "({})",
+                node.patterns
+                    .iter()
+                    .map(|pattern| format!("({})", self.pattern(pattern)))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ),
+            Pattern::Invalid(_) => "_".into(),
         }
     }
 
@@ -1416,7 +1815,7 @@ impl Unparser {
         values
             .iter()
             .map(|value| match value {
-                Expr::StringLiteral(node) => node.value.to_str().into_owned(),
+                Expr::StringLiteral(node) => fstring_literal(&node.value.to_str()),
                 Expr::FormattedValue(node) => {
                     let conversion =
                         node.conversion.map_or(String::new(), |value| format!("!{value}"));
@@ -1428,10 +1827,64 @@ impl Unparser {
                     });
                     format!("{{{}{conversion}{spec}}}", self.expression(&node.value))
                 }
-                _ => self.expression(value),
+                _ => fstring_literal(&self.expression(value)),
             })
             .collect()
     }
+
+    fn pattern_value_expression(&self, expression: &Expr) -> String {
+        match expression {
+            Expr::BinOp(node) => format!(
+                "{} {} {}",
+                self.pattern_value_expression(&node.left),
+                binary_text(node.op),
+                self.pattern_value_expression(&node.right)
+            ),
+            Expr::UnaryOp(node) => {
+                format!("{}{}", unary_text(node.op), self.pattern_value_expression(&node.operand))
+            }
+            other => self.expression(other),
+        }
+    }
+}
+
+fn fstring_literal(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '{' => output.push_str("{{"),
+            '}' => output.push_str("}}"),
+            '\\' => output.push_str("\\\\"),
+            '"' => output.push_str("\\\""),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            other if other.is_control() => {
+                let code = other as u32;
+                if code <= 0xff {
+                    output.push_str(&format!("\\x{code:02x}"));
+                } else if code <= 0xffff {
+                    output.push_str(&format!("\\u{code:04x}"));
+                } else {
+                    output.push_str(&format!("\\U{code:08x}"));
+                }
+            }
+            other => output.push(other),
+        }
+    }
+    output
+}
+
+fn alias_text(alias: &Alias) -> String {
+    alias
+        .asname
+        .as_ref()
+        .map(|asname| format!("{} as {asname}", alias.name))
+        .unwrap_or_else(|| alias.name.to_string())
+}
+
+fn type_comment_suffix(type_comment: Option<&str>) -> String {
+    type_comment.map(|value| format!(" # type: {value}")).unwrap_or_default()
 }
 
 fn binary_text(operator: BinaryOperator) -> &'static str {

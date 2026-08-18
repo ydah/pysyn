@@ -71,6 +71,50 @@ fn tokenizes_and_parses_nested_f_strings() {
 }
 
 #[test]
+fn tokenizes_raw_fstring_fields_and_unicode_name_escapes() {
+    let raw = r#"fr'\N{AMPERSAND}'"#;
+    let kinds =
+        tokenize_with(raw, LexOptions { mode: LexMode::Full, version: PythonVersion::Py313 })
+            .filter_map(Result::ok)
+            .map(|token| token.kind)
+            .filter(|kind| {
+                matches!(
+                    kind,
+                    TokenKind::FStringStart { .. }
+                        | TokenKind::FStringMiddle
+                        | TokenKind::FStringEnd { .. }
+                        | TokenKind::LBrace
+                        | TokenKind::RBrace
+                        | TokenKind::Name
+                )
+            })
+            .collect::<Vec<_>>();
+    assert!(matches!(kinds[0], TokenKind::FStringStart { .. }));
+    assert_eq!(kinds[1], TokenKind::FStringMiddle);
+    assert_eq!(kinds[2], TokenKind::LBrace);
+    assert_eq!(kinds[3], TokenKind::Name);
+    assert_eq!(kinds[4], TokenKind::RBrace);
+    assert!(matches!(kinds[5], TokenKind::FStringEnd { .. }));
+
+    let unicode_name = r#"f'\N{AMPERSAND}3'"#;
+    let middle_ranges = tokenize_with(
+        unicode_name,
+        LexOptions { mode: LexMode::Full, version: PythonVersion::Py313 },
+    )
+    .filter_map(Result::ok)
+    .filter(|token| token.kind == TokenKind::FStringMiddle)
+    .map(|token| token.range)
+    .collect::<Vec<_>>();
+    assert_eq!(middle_ranges.len(), 2);
+
+    let module = pysyn::parse_module("value = fr'\\N{AMPERSAND}'\n")
+        .expect("raw f-string field should parse");
+    let dump = pysyn::printer::dump(&module, Default::default());
+    assert!(dump.contains("Constant(value='\\\\N')"));
+    assert!(dump.contains("FormattedValue(value=Name(id='AMPERSAND'"));
+}
+
+#[test]
 fn parses_soft_keyword_statement_boundaries() {
     let source = "match value:\n    case 1:\n        result = 1\ntype Alias = list[int]\nmatch = 2\nvalue = type(thing)\n";
     let module = pysyn::parse_module(source).expect("valid soft-keyword source");
@@ -177,6 +221,62 @@ fn parses_fstring_literal_concatenation_and_inline_suites() {
 }
 
 #[test]
+fn preserves_python_expression_precedence_and_literal_kinds() {
+    let source = "value = -number - 1\n".to_owned()
+        + "grouped = (left == right) != other\n"
+        + "mixed = \"prefix \" f\"value={name!r}\"\n"
+        + "magic = 0x13579ace\n";
+    let module = pysyn::parse_module(&source).expect("valid precedence source");
+    let dump = pysyn::printer::dump(&module, Default::default());
+    assert!(dump.contains("BinOp(left=UnaryOp(op=USub(), operand=Name(id='number'"));
+    assert!(dump.contains("Compare(left=Compare(left=Name(id='left'"));
+    assert!(dump.contains("JoinedStr(values=[Constant(value='prefix value='), FormattedValue"));
+    assert!(dump.contains("Constant(value=0x13579ace)"));
+}
+
+#[test]
+fn records_annotation_simple_flag_and_extended_patterns() {
+    let source = concat!(
+        "value: int = 1\n",
+        "obj.value: int = 2\n",
+        "match value:\n",
+        "    case ():\n        pass\n",
+        "    case 0, *rest:\n        pass\n",
+    );
+    let module = pysyn::parse_module(source).expect("valid annotation and pattern source");
+    let Stmt::AnnAssign(simple) = &module.body[0] else { panic!("expected simple annotation") };
+    assert!(simple.simple);
+    let Stmt::AnnAssign(attribute) = &module.body[1] else {
+        panic!("expected attribute annotation")
+    };
+    assert!(!attribute.simple);
+    let Stmt::Match(statement) = &module.body[2] else { panic!("expected match") };
+    assert!(matches!(statement.cases[0].pattern, pysyn::ast::Pattern::Sequence(_)));
+    assert!(matches!(statement.cases[1].pattern, pysyn::ast::Pattern::Sequence(_)));
+}
+
+#[test]
+fn accepts_pep701_fstring_forms_and_unicode_names() {
+    let source = concat!(
+        "debug = f'{value=}'\n",
+        "comment = f'{value  # explain\n}'\n",
+        "newline = f'{(value +\n 1)}'\n",
+        "named = f'\\N{GREEK CAPITAL LETTER DELTA}'\n",
+    );
+    let module = pysyn::parse_module(source).expect("valid PEP 701 source");
+    let dump = pysyn::printer::dump(&module, Default::default());
+    assert!(dump.contains("conversion=114"));
+    assert!(dump.contains("Constant(value='Δ')"));
+}
+
+#[test]
+fn bounds_deep_input_without_stack_overflow() {
+    let source = format!("value = {}\n", "1+".repeat(10_000) + "1");
+    let parsed = parse(&source, ParseOptions { max_depth: 32, ..ParseOptions::default() });
+    assert!(parsed.errors.iter().any(|error| error.code == pysyn::DiagnosticCode::TooDeep));
+}
+
+#[test]
 fn detects_python_source_encoding_markers() {
     assert_eq!(
         pysyn::detect_encoding(b"# coding: cp932\n"),
@@ -187,6 +287,15 @@ fn detects_python_source_encoding_markers() {
         Ok(pysyn::SourceEncoding::Utf8Bom)
     );
     assert!(pysyn::detect_encoding(b"\xef\xbb\xbf# coding: latin-1\n").is_err());
+}
+
+#[cfg(feature = "encoding")]
+#[test]
+fn decodes_declared_non_utf8_source() {
+    let source =
+        pysyn::SourceFile::from_bytes("cp932.py", b"# coding: cp932\n\x93\xfa\x96\x7b = 1\n")
+            .expect("cp932 source should decode");
+    assert!(source.text().contains("日本 = 1"));
 }
 
 #[test]

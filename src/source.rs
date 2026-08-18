@@ -255,11 +255,14 @@ impl SourceFile {
         &self.index
     }
 
-    /// Decodes UTF-8 source bytes, honoring an optional UTF-8 BOM.
+    /// Decodes source bytes, honoring an optional UTF-8 BOM and PEP 263 cookie.
     pub fn from_bytes(name: impl Into<String>, bytes: &[u8]) -> Result<Self, SourceError> {
         let encoding = detect_encoding(bytes)?;
-        let payload = if matches!(encoding, SourceEncoding::Utf8Bom) { &bytes[3..] } else { bytes };
-        let text = std::str::from_utf8(payload).map_err(|_| SourceError::InvalidUtf8)?.to_owned();
+        let text = match &encoding {
+            SourceEncoding::Utf8 => decode_utf8(bytes)?,
+            SourceEncoding::Utf8Bom => decode_utf8(&bytes[3..])?,
+            SourceEncoding::Declared(name) => decode_declared(name, bytes)?,
+        };
         Self::new(name, text)
     }
 }
@@ -279,40 +282,124 @@ pub enum SourceEncoding {
 pub fn detect_encoding(bytes: &[u8]) -> Result<SourceEncoding, SourceError> {
     let has_bom = bytes.starts_with(&[0xef, 0xbb, 0xbf]);
     let scan = if has_bom { &bytes[3..] } else { bytes };
-    for line in scan.split(|byte| *byte == b'\n' || *byte == b'\r').take(2) {
-        if let Some(position) =
-            line.windows(6).position(|window| window.eq_ignore_ascii_case(b"coding"))
-        {
-            let tail = &line[position + 6..];
-            let tail = tail.strip_prefix(b":").or_else(|| tail.strip_prefix(b"="));
-            if let Some(tail) = tail {
-                let name = tail
-                    .iter()
-                    .skip_while(|byte| byte.is_ascii_whitespace())
-                    .take_while(|byte| {
-                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
-                    })
-                    .copied()
-                    .collect::<Vec<_>>();
-                if !name.is_empty() {
-                    let name = String::from_utf8_lossy(&name).to_ascii_lowercase();
-                    if has_bom && name != "utf-8" && name != "utf8" {
-                        return Err(SourceError::EncodingProblem);
-                    }
-                    return Ok(if name == "utf-8" || name == "utf8" {
-                        if has_bom {
-                            SourceEncoding::Utf8Bom
-                        } else {
-                            SourceEncoding::Utf8
-                        }
-                    } else {
-                        SourceEncoding::Declared(name.into())
-                    });
-                }
-            }
+    if let Some(name) = find_cookie(scan) {
+        if has_bom && !is_utf8_encoding(&name) {
+            return Err(SourceError::EncodingProblem);
         }
+        return Ok(if is_utf8_encoding(&name) {
+            if has_bom {
+                SourceEncoding::Utf8Bom
+            } else {
+                SourceEncoding::Utf8
+            }
+        } else {
+            SourceEncoding::Declared(name.into())
+        });
     }
     Ok(if has_bom { SourceEncoding::Utf8Bom } else { SourceEncoding::Utf8 })
+}
+
+/// Returns the spelling CPython's `tokenize` module uses for its ENCODING token.
+pub fn detected_encoding_name(bytes: &[u8]) -> Result<Box<str>, SourceError> {
+    if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+        return Ok("utf-8".into());
+    }
+    let Some(name) = find_cookie(bytes) else {
+        return Ok("utf-8".into());
+    };
+    Ok(match name.as_str() {
+        "latin-1" => "iso-8859-1".into(),
+        other => other.into(),
+    })
+}
+
+fn find_cookie(bytes: &[u8]) -> Option<String> {
+    let mut lines = bytes.split(|byte| *byte == b'\n');
+    let first = lines.next().unwrap_or_default();
+    if let Some(name) = cookie_in_line(first) {
+        return Some(name);
+    }
+    if is_comment_or_blank(first) {
+        return lines.next().and_then(cookie_in_line);
+    }
+    None
+}
+
+fn cookie_in_line(line: &[u8]) -> Option<String> {
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    let mut content = line;
+    while matches!(content.first(), Some(b' ' | b'\t' | b'\x0c')) {
+        content = &content[1..];
+    }
+    let content = content.strip_prefix(b"#")?;
+    let position = content.windows(6).position(|window| window.eq_ignore_ascii_case(b"coding"))?;
+    let tail = &content[position + 6..];
+    let tail = tail.strip_prefix(b":").or_else(|| tail.strip_prefix(b"="))?;
+    let name = tail
+        .iter()
+        .skip_while(|byte| byte.is_ascii_whitespace())
+        .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        .copied()
+        .collect::<Vec<_>>();
+    (!name.is_empty()).then(|| String::from_utf8_lossy(&name).to_ascii_lowercase())
+}
+
+fn is_comment_or_blank(line: &[u8]) -> bool {
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    let mut line = line;
+    while matches!(line.first(), Some(b' ' | b'\t' | b'\x0c')) {
+        line = &line[1..];
+    }
+    line.is_empty() || line.starts_with(b"#")
+}
+
+fn is_utf8_encoding(name: &str) -> bool {
+    matches!(name, "utf-8" | "utf8")
+}
+
+fn decode_utf8(bytes: &[u8]) -> Result<String, SourceError> {
+    std::str::from_utf8(bytes).map(str::to_owned).map_err(|_| SourceError::InvalidUtf8)
+}
+
+fn decode_declared(name: &str, bytes: &[u8]) -> Result<String, SourceError> {
+    #[cfg(feature = "encoding")]
+    {
+        let normalized = name.replace(['-', '_'], "");
+        if normalized == "ascii" {
+            return bytes
+                .iter()
+                .copied()
+                .map(char::from)
+                .map(|character| {
+                    if character <= '\u{7f}' {
+                        Ok(character)
+                    } else {
+                        Err(SourceError::InvalidEncoding { encoding: name.into() })
+                    }
+                })
+                .collect();
+        }
+        if matches!(normalized.as_str(), "latin1" | "iso88591" | "l1") {
+            let mut text = String::with_capacity(bytes.len());
+            for &byte in bytes {
+                text.push(char::from(byte));
+            }
+            return Ok(text);
+        }
+        let encoding_label = match normalized.as_str() {
+            "cp932" | "ms932" | "windows31j" => "shift_jis",
+            _ => name,
+        };
+        if let Some(encoding) = encoding_rs::Encoding::for_label(encoding_label.as_bytes()) {
+            let (text, _, had_errors) = encoding.decode(bytes);
+            if !had_errors {
+                return Ok(text.into_owned());
+            }
+            return Err(SourceError::InvalidEncoding { encoding: name.into() });
+        }
+    }
+    let _ = bytes;
+    Err(SourceError::UnsupportedEncoding { encoding: name.into() })
 }
 
 /// Errors raised while constructing a source file.
@@ -325,6 +412,16 @@ pub enum SourceError {
     },
     /// The bytes are not valid UTF-8.
     InvalidUtf8,
+    /// The declared codec is not available in this build.
+    UnsupportedEncoding {
+        /// Declared codec name.
+        encoding: Box<str>,
+    },
+    /// The source contains bytes invalid for its declared codec.
+    InvalidEncoding {
+        /// Declared codec name.
+        encoding: Box<str>,
+    },
     /// A BOM conflicts with a declared encoding.
     EncodingProblem,
 }
@@ -334,6 +431,12 @@ impl fmt::Display for SourceError {
         match self {
             Self::FileTooLarge { size } => write!(f, "source file is too large: {size} bytes"),
             Self::InvalidUtf8 => f.write_str("source is not valid UTF-8"),
+            Self::UnsupportedEncoding { encoding } => {
+                write!(f, "source encoding is not available: {encoding}")
+            }
+            Self::InvalidEncoding { encoding } => {
+                write!(f, "source contains invalid bytes for encoding: {encoding}")
+            }
             Self::EncodingProblem => {
                 f.write_str("source encoding declaration conflicts with UTF-8 BOM")
             }

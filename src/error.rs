@@ -170,6 +170,16 @@ impl ParseError {
             ),
         }
     }
+    /// Creates a parser resource-limit error for oversized ASTs.
+    pub fn too_many_nodes(range: TextRange) -> Self {
+        Self {
+            diagnostic: Diagnostic::error(
+                DiagnosticCode::TooDeep,
+                range,
+                "maximum parser node budget exceeded",
+            ),
+        }
+    }
     /// Returns the failure range.
     pub const fn range(&self) -> TextRange {
         self.diagnostic.range

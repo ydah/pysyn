@@ -10,15 +10,18 @@ readme = "README.md"
 [features]
 default = ["std", "nfkc"]
 std = []
-encoding = []
+encoding = ["dep:encoding_rs"]
 bigint = []
 serde = []
 miette = []
 intern = []
-nfkc = []
+nfkc = ["dep:unicode-normalization"]
 
 [dependencies]
 unicode-ident = "1.0"
+encoding_rs = { version = "0.8", optional = true }
+unicode_names2 = "1"
+unicode-normalization = { version = "0.1", optional = true }
 
 [[bin]]
 name = "pysyn"

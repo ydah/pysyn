@@ -17,5 +17,6 @@ pub use ast::ModModule;
 pub use error::{Diagnostic, DiagnosticCode, ParseError, Severity};
 pub use parser::{parse, parse_expression, parse_module, ParseMode, ParseOptions, Parsed};
 pub use source::{
-    detect_encoding, LineCol, LineIndex, SourceEncoding, SourceFile, TextRange, TextSize,
+    detect_encoding, detected_encoding_name, LineCol, LineIndex, SourceEncoding, SourceFile,
+    TextRange, TextSize,
 };

@@ -2,7 +2,7 @@
 
 #![allow(missing_docs)]
 
-use crate::ast::{AnyNodeRef, Expr, ModModule, Pattern, Ranged, Stmt};
+use crate::ast::{AnyNodeRef, Expr, ModModule, Parameters, Pattern, Ranged, Stmt, TypeParam};
 
 pub trait Visitor<'a> {
     fn visit_stmt(&mut self, node: &'a Stmt) {
@@ -89,14 +89,8 @@ pub fn walk_stmt<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, node: &'a Stmt) {
             for decorator in &stmt.decorator_list {
                 visitor.visit_expr(decorator);
             }
-            for parameter in stmt.args.posonlyargs.iter().chain(&stmt.args.args) {
-                if let Some(annotation) = &parameter.annotation {
-                    visitor.visit_expr(annotation);
-                }
-                if let Some(default) = &parameter.default {
-                    visitor.visit_expr(default);
-                }
-            }
+            walk_type_params(visitor, &stmt.type_params);
+            walk_parameters(visitor, &stmt.args);
             if let Some(value) = &stmt.returns {
                 visitor.visit_expr(value);
             }
@@ -105,12 +99,16 @@ pub fn walk_stmt<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, node: &'a Stmt) {
             }
         }
         Stmt::ClassDef(stmt) => {
+            for decorator in &stmt.decorator_list {
+                visitor.visit_expr(decorator);
+            }
             for base in &stmt.bases {
                 visitor.visit_expr(base);
             }
             for keyword in &stmt.keywords {
                 visitor.visit_expr(&keyword.value);
             }
+            walk_type_params(visitor, &stmt.type_params);
             for child in &stmt.body {
                 visitor.visit_stmt(child);
             }
@@ -170,7 +168,68 @@ pub fn walk_stmt<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, node: &'a Stmt) {
         }
         Stmt::TypeAlias(stmt) => {
             visitor.visit_expr(&stmt.name);
+            walk_type_params(visitor, &stmt.type_params);
             visitor.visit_expr(&stmt.value);
+        }
+    }
+}
+
+fn walk_parameters<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, parameters: &'a Parameters) {
+    for parameter in parameters.posonlyargs.iter().chain(&parameters.args) {
+        walk_parameter(visitor, parameter, None);
+    }
+
+    for (index, parameter) in parameters.kwonlyargs.iter().enumerate() {
+        let fallback = parameters.kw_defaults.get(index).and_then(Option::as_ref);
+        walk_parameter(visitor, parameter, fallback);
+    }
+
+    if let Some(parameter) = &parameters.vararg {
+        walk_parameter(visitor, parameter, None);
+    }
+    if let Some(parameter) = &parameters.kwarg {
+        walk_parameter(visitor, parameter, None);
+    }
+
+    let has_positional_defaults = parameters
+        .posonlyargs
+        .iter()
+        .chain(&parameters.args)
+        .any(|parameter| parameter.default.is_some());
+    if !has_positional_defaults {
+        for default in &parameters.defaults {
+            visitor.visit_expr(default);
+        }
+    }
+}
+
+fn walk_parameter<'a, V: Visitor<'a> + ?Sized>(
+    visitor: &mut V,
+    parameter: &'a crate::ast::Parameter,
+    fallback_default: Option<&'a Expr>,
+) {
+    if let Some(annotation) = &parameter.annotation {
+        visitor.visit_expr(annotation);
+    }
+    if let Some(default) = &parameter.default {
+        visitor.visit_expr(default);
+    } else if let Some(default) = fallback_default {
+        visitor.visit_expr(default);
+    }
+}
+
+fn walk_type_params<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, type_params: &'a [TypeParam]) {
+    for type_param in type_params {
+        let data = match type_param {
+            TypeParam::TypeVar(data)
+            | TypeParam::ParamSpec(data)
+            | TypeParam::TypeVarTuple(data) => data,
+        };
+        if let Some(bound) = &data.bound {
+            visitor.visit_expr(bound);
+        }
+        if let Some(default) = &data.default {
+            visitor.visit_expr(default);
         }
     }
 }
@@ -231,7 +290,10 @@ pub fn walk_expr<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, node: &'a Expr) {
             visitor.visit_expr(&node.right);
         }
         Expr::UnaryOp(node) => visitor.visit_expr(&node.operand),
-        Expr::Lambda(node) => visitor.visit_expr(&node.body),
+        Expr::Lambda(node) => {
+            walk_parameters(visitor, &node.args);
+            visitor.visit_expr(&node.body);
+        }
         Expr::IfExp(node) => {
             visitor.visit_expr(&node.body);
             visitor.visit_expr(&node.test);

@@ -195,6 +195,13 @@ impl<'src> Scanner<'src> {
             self.scan_name();
             return;
         }
+        if self.options.mode == LexMode::Full && !byte.is_ascii() {
+            // CPython's tokenize module is intentionally permissive here:
+            // non-identifier Unicode scalars are still surfaced as NAME and
+            // left for the parser/compiler to reject.
+            self.scan_name();
+            return;
+        }
         if byte.is_ascii_digit()
             || (byte == b'.'
                 && matches!(self.src.as_bytes().get(self.position + 1), Some(byte) if byte.is_ascii_digit()))
@@ -417,7 +424,7 @@ impl<'src> Scanner<'src> {
         let lower = text.to_ascii_lowercase();
         let kind = if lower.ends_with('j') {
             TokenKind::Complex
-        } else if lower.contains('.') || lower.contains('e') {
+        } else if base.is_none() && (lower.contains('.') || lower.contains('e')) {
             TokenKind::Float
         } else {
             TokenKind::Int
@@ -465,7 +472,7 @@ impl<'src> Scanner<'src> {
         }
         let flags = StringPrefix::parse(prefix)?;
         let end = if flags.is_format() {
-            self.scan_fstring_body(cursor)
+            self.scan_fstring_body(cursor, flags.is_raw())
         } else {
             self.scan_string_body(cursor, flags.is_raw())
         };
@@ -519,7 +526,7 @@ impl<'src> Scanner<'src> {
         self.src.len()
     }
 
-    fn scan_fstring_body(&mut self, quote_start: usize) -> usize {
+    fn scan_fstring_body(&mut self, quote_start: usize, raw: bool) -> usize {
         let quote = self.src.as_bytes()[quote_start];
         let triple = self.src.as_bytes().get(quote_start..quote_start + 3)
             == Some(if quote == b'\'' { b"'''" } else { b"\"\"\"" });
@@ -528,6 +535,8 @@ impl<'src> Scanner<'src> {
         let mut field_depth = 0u32;
         let mut string_quote = None;
         let mut string_triple = false;
+        let mut field_comment = false;
+        let mut field_format_spec = false;
         while cursor < self.src.len() {
             let byte = self.src.as_bytes()[cursor];
             if let Some(active_quote) = string_quote {
@@ -550,10 +559,22 @@ impl<'src> Scanner<'src> {
                 }
                 continue;
             }
+            if field_comment {
+                if matches!(byte, b'\n' | b'\r') {
+                    field_comment = false;
+                }
+                cursor += char_len_at(self.src, cursor);
+                continue;
+            }
             if field_depth == 0 {
                 if byte == b'\\' {
-                    cursor += 1;
-                    if self.src.as_bytes().get(cursor) == Some(&quote) {
+                    let slash_start = cursor;
+                    while self.src.as_bytes().get(cursor) == Some(&b'\\') {
+                        cursor += 1;
+                    }
+                    if (cursor - slash_start) % 2 == 1
+                        && self.src.as_bytes().get(cursor) == Some(&quote)
+                    {
                         cursor += char_len_at(self.src, cursor);
                     }
                     continue;
@@ -573,16 +594,29 @@ impl<'src> Scanner<'src> {
                 {
                     return cursor + delimiter;
                 }
-                if byte == b'{' && self.src.as_bytes().get(cursor + 1) != Some(&b'{') {
+                if byte == b'{'
+                    && self.src.as_bytes().get(cursor + 1) != Some(&b'{')
+                    && (raw || !is_unicode_name_brace(self.src, cursor))
+                {
                     field_depth = 1;
                     cursor += 1;
-                } else if byte == b'{' || byte == b'}' {
+                } else if (byte == b'{' || byte == b'}')
+                    && self.src.as_bytes().get(cursor + 1) == Some(&byte)
+                {
                     cursor += 2;
                 } else {
                     cursor += char_len_at(self.src, cursor);
                 }
             } else {
                 match byte {
+                    b':' if field_depth == 1 => {
+                        field_format_spec = true;
+                        cursor += 1;
+                    }
+                    b'#' if !field_format_spec => {
+                        field_comment = true;
+                        cursor += 1;
+                    }
                     b'\'' | b'"' => {
                         string_quote = Some(byte);
                         string_triple = self.src.as_bytes().get(cursor..cursor + 3)
@@ -595,6 +629,9 @@ impl<'src> Scanner<'src> {
                     }
                     b'}' => {
                         field_depth = field_depth.saturating_sub(1);
+                        if field_depth == 0 {
+                            field_format_spec = false;
+                        }
                         cursor += 1;
                     }
                     _ => cursor += char_len_at(self.src, cursor),
@@ -624,9 +661,12 @@ impl<'src> Scanner<'src> {
         let mut literal_start = body_start;
         while cursor < body_end {
             let byte = self.src.as_bytes()[cursor];
-            if byte == b'{' && self.src.as_bytes().get(cursor + 1) != Some(&b'{') {
+            if byte == b'{'
+                && self.src.as_bytes().get(cursor + 1) != Some(&b'{')
+                && (prefix.is_raw() || !is_unicode_name_brace(self.src, cursor))
+            {
                 if literal_start < cursor {
-                    self.emit(TokenKind::FStringMiddle, literal_start, cursor);
+                    self.emit_fstring_middle_range(literal_start, cursor);
                 }
                 self.emit(TokenKind::LBrace, cursor, cursor + 1);
                 let expression_start = cursor + 1;
@@ -646,7 +686,7 @@ impl<'src> Scanner<'src> {
             }
         }
         if literal_start < body_end {
-            self.emit(TokenKind::FStringMiddle, literal_start, body_end);
+            self.emit_fstring_middle_range(literal_start, body_end);
         }
         self.emit(TokenKind::FStringEnd { prefix, triple }, body_end, end);
     }
@@ -655,25 +695,113 @@ impl<'src> Scanner<'src> {
         if start >= end {
             return;
         }
+        if let Some(colon) = fstring_format_colon(self.src, start, end) {
+            self.emit_fstring_tokens(start, colon);
+            self.emit(TokenKind::Colon, colon, colon + 1);
+            self.emit_fstring_format_spec(colon + 1, end);
+            return;
+        }
+        self.emit_fstring_tokens(start, end);
+    }
+
+    fn emit_fstring_tokens(&mut self, start: usize, end: usize) {
         let expression = &self.src[start..end];
         for item in tokenize_with(
             expression,
-            LexOptions { mode: LexMode::Parse, version: self.options.version },
+            LexOptions { mode: LexMode::Full, version: self.options.version },
         ) {
             let Ok(token) = item else { continue };
-            if matches!(
-                token.kind,
-                TokenKind::EndMarker | TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent
-            ) {
+            if matches!(token.kind, TokenKind::EndMarker | TokenKind::Indent | TokenKind::Dedent) {
                 continue;
             }
+            let kind = if token.kind == TokenKind::Newline {
+                if token.range.start() == token.range.end() {
+                    continue;
+                }
+                TokenKind::NonLogicalNewline
+            } else {
+                token.kind
+            };
             self.items.push(Ok(Token::new(
-                token.kind,
+                kind,
                 TextRange::from_usize(
                     start + token.range.start().as_usize(),
                     start + token.range.end().as_usize(),
                 ),
             )));
+        }
+    }
+
+    fn emit_fstring_format_spec(&mut self, start: usize, end: usize) {
+        let mut cursor = start;
+        let mut literal_start = start;
+        while cursor < end {
+            if self.src.as_bytes()[cursor] == b'{'
+                && self.src.as_bytes().get(cursor + 1) != Some(&b'{')
+            {
+                if literal_start < cursor {
+                    self.emit_fstring_middle_range(literal_start, cursor);
+                }
+                self.emit(TokenKind::LBrace, cursor, cursor + 1);
+                let nested_end = matching_fstring_brace(self.src, cursor + 1, end);
+                self.emit_fstring_expression(cursor + 1, nested_end);
+                if nested_end < end {
+                    self.emit(TokenKind::RBrace, nested_end, nested_end + 1);
+                    cursor = nested_end + 1;
+                } else {
+                    cursor = end;
+                }
+                literal_start = cursor;
+            } else if (self.src.as_bytes()[cursor] == b'{' || self.src.as_bytes()[cursor] == b'}')
+                && self.src.as_bytes().get(cursor + 1) == self.src.as_bytes().get(cursor)
+            {
+                cursor += 2;
+            } else {
+                cursor += char_len_at(self.src, cursor);
+            }
+        }
+        if literal_start < end {
+            self.emit_fstring_middle_range(literal_start, end);
+        } else {
+            self.emit(TokenKind::FStringMiddle, end, end);
+        }
+    }
+
+    fn emit_fstring_middle_range(&mut self, start: usize, end: usize) {
+        let mut cursor = start;
+        let mut literal_start = start;
+        while cursor < end {
+            if cursor + 3 <= end
+                && self.src.as_bytes()[cursor] == b'\\'
+                && self.src.as_bytes().get(cursor + 1) == Some(&b'N')
+                && self.src.as_bytes().get(cursor + 2) == Some(&b'{')
+            {
+                if let Some(name_end) = self.src[cursor + 3..end].find('}') {
+                    let after_name = cursor + 3 + name_end + 1;
+                    if after_name < end {
+                        self.emit(TokenKind::FStringMiddle, literal_start, after_name);
+                        cursor = after_name;
+                        literal_start = cursor;
+                        continue;
+                    }
+                    cursor = end;
+                    continue;
+                }
+            }
+            if (self.src.as_bytes()[cursor] == b'{' || self.src.as_bytes()[cursor] == b'}')
+                && self.src.as_bytes().get(cursor + 1) == self.src.as_bytes().get(cursor)
+            {
+                if literal_start < cursor + 1 {
+                    self.emit(TokenKind::FStringMiddle, literal_start, cursor + 1);
+                }
+                cursor += 2;
+                literal_start = cursor;
+            } else {
+                cursor += char_len_at(self.src, cursor);
+            }
+        }
+        if literal_start < end {
+            self.emit(TokenKind::FStringMiddle, literal_start, end);
         }
     }
 
@@ -696,12 +824,73 @@ fn char_len_at(source: &str, position: usize) -> usize {
     source.get(position..).and_then(|tail| tail.chars().next()).map_or(1, char::len_utf8)
 }
 
+fn fstring_format_colon(source: &str, start: usize, end: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut depth = 0u32;
+    let mut cursor = start;
+    while cursor < end {
+        match bytes[cursor] {
+            b'\'' | b'"' => skip_fstring_quote(source, &mut cursor, end),
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                cursor += 1;
+            }
+            b')' | b']' | b'}' => {
+                depth = depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b':' if depth == 0 => return Some(cursor),
+            _ => cursor += char_len_at(source, cursor),
+        }
+    }
+    None
+}
+
+fn skip_fstring_quote(source: &str, cursor: &mut usize, end: usize) {
+    let quote = source.as_bytes()[*cursor];
+    *cursor += 1;
+    while *cursor < end {
+        if source.as_bytes()[*cursor] == b'\\' {
+            *cursor += 1;
+            if *cursor < end {
+                *cursor += char_len_at(source, *cursor);
+            }
+        } else if source.as_bytes()[*cursor] == quote {
+            *cursor += 1;
+            return;
+        } else {
+            *cursor += char_len_at(source, *cursor);
+        }
+    }
+}
+
+fn is_unicode_name_brace(source: &str, index: usize) -> bool {
+    let bytes = source.as_bytes();
+    if index < 2 || bytes[index - 1] != b'N' {
+        return false;
+    }
+    let mut slash_count = 0;
+    let mut cursor = index - 2;
+    loop {
+        if bytes[cursor] != b'\\' {
+            break;
+        }
+        slash_count += 1;
+        if cursor == 0 {
+            break;
+        }
+        cursor -= 1;
+    }
+    slash_count % 2 == 1
+}
+
 fn is_identifier_start(character: char) -> bool {
     character == '_' || unicode_ident::is_xid_start(character)
 }
 
 fn matching_fstring_brace(source: &str, start: usize, end: usize) -> usize {
     let mut depth = 1u32;
+    let mut format_spec = false;
     let mut cursor = start;
     while cursor < end {
         match source.as_bytes()[cursor] {
@@ -712,15 +901,54 @@ fn matching_fstring_brace(source: &str, start: usize, end: usize) -> usize {
                     return cursor;
                 }
             }
+            b':' if depth == 1 => format_spec = true,
+            b'#' if !format_spec => {
+                while cursor < end && !matches!(source.as_bytes()[cursor], b'\n' | b'\r') {
+                    cursor += 1;
+                }
+                continue;
+            }
             b'\'' | b'"' => {
                 let quote = source.as_bytes()[cursor];
+                let triple = source.as_bytes().get(cursor..cursor + 3)
+                    == Some(if quote == b'\'' { b"'''" } else { b"\"\"\"" });
+                let delimiter = if triple { 3 } else { 1 };
                 cursor += 1;
-                while cursor < end && source.as_bytes()[cursor] != quote {
+                if triple {
+                    cursor += 2;
+                }
+                while cursor < end {
                     if source.as_bytes()[cursor] == b'\\' {
-                        cursor += 1;
+                        let slash_start = cursor;
+                        while source.as_bytes().get(cursor) == Some(&b'\\') {
+                            cursor += 1;
+                        }
+                        if (cursor - slash_start) % 2 == 1
+                            && source.as_bytes().get(cursor) == Some(&quote)
+                        {
+                            cursor += 1;
+                        }
+                        continue;
+                    }
+                    if source.as_bytes().get(cursor..cursor + delimiter)
+                        == Some(if quote == b'\'' {
+                            if triple {
+                                b"'''"
+                            } else {
+                                b"'"
+                            }
+                        } else if triple {
+                            b"\"\"\""
+                        } else {
+                            b"\""
+                        })
+                    {
+                        cursor += delimiter;
+                        break;
                     }
                     cursor += source[cursor..].chars().next().map_or(1, char::len_utf8);
                 }
+                continue;
             }
             _ => {}
         }

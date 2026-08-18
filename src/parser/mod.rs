@@ -5,8 +5,11 @@
 use crate::ast::*;
 use crate::error::{Diagnostic, ParseError, Severity};
 use crate::lexer::{tokenize_with, LexMode, LexOptions};
-use crate::source::TextRange;
+use crate::source::{TextRange, TextSize};
 use crate::token::{PythonVersion, Token, TokenKind};
+use std::collections::HashSet;
+#[cfg(feature = "nfkc")]
+use unicode_normalization::UnicodeNormalization;
 
 /// Parsing mode for complete source text.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -25,6 +28,8 @@ pub struct ParseOptions {
     pub keep_comments: bool,
     pub type_comments: bool,
     pub max_depth: u32,
+    /// Maximum number of expression parser invocations allowed for one input.
+    pub max_nodes: usize,
     pub max_errors: usize,
     pub keep_tokens: bool,
 }
@@ -38,6 +43,7 @@ impl Default for ParseOptions {
             keep_comments: true,
             type_comments: false,
             max_depth: 200,
+            max_nodes: 100_000,
             max_errors: 100,
             keep_tokens: false,
         }
@@ -77,7 +83,8 @@ pub fn parse_module(src: &str) -> Result<ModModule, ParseError> {
 pub fn parse_expression(src: &str) -> Result<Expr, ParseError> {
     let options = ParseOptions { mode: SourceMode::Expression, ..ParseOptions::default() };
     let mut parser = Parser::new(src, options);
-    let expr = parser.expression(0)?;
+    let first = parser.expression(0)?;
+    let expr = if parser.at(TokenKind::Comma) { parser.comma_expression(first)? } else { first };
     parser.skip_newlines();
     if !parser.at(TokenKind::EndMarker) {
         return Err(parser.error_here("unexpected token after expression"));
@@ -130,8 +137,9 @@ struct Parser<'src> {
     options: ParseOptions,
     errors: Vec<Diagnostic>,
     depth: u32,
+    expression_nodes: usize,
+    grouped_expressions: HashSet<TextRange>,
     stop_in: bool,
-    stop_pattern_guard: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -166,8 +174,9 @@ impl<'src> Parser<'src> {
             options,
             errors,
             depth: 0,
+            expression_nodes: 0,
+            grouped_expressions: HashSet::new(),
             stop_in: false,
-            stop_pattern_guard: false,
         }
     }
 
@@ -307,7 +316,7 @@ impl<'src> Parser<'src> {
         self.skip_newlines();
         while self.at_word("case") {
             let case_start = self.bump().range.start();
-            let pattern = self.pattern()?;
+            let pattern = self.case_pattern()?;
             let guard = if self.at(TokenKind::If) {
                 self.bump();
                 Some(self.expression(0)?)
@@ -552,14 +561,14 @@ impl<'src> Parser<'src> {
         }
         self.expect(TokenKind::With)?;
         let mut items = Vec::new();
-        let parenthesized = self.at(TokenKind::LPar) && self.has_top_level_comma();
+        let parenthesized = self.at(TokenKind::LPar) && self.has_top_level_with_separator();
         if parenthesized {
             self.bump();
         }
         loop {
             let context_expr = self.expression(0)?;
             let optional_vars =
-                if self.eat(TokenKind::As) { Some(self.expression(0)?) } else { None };
+                if self.eat(TokenKind::As) { Some(mark_store(self.expression(0)?)?) } else { None };
             let end = optional_vars
                 .as_ref()
                 .map(Ranged::range)
@@ -727,8 +736,14 @@ impl<'src> Parser<'src> {
     fn import_from_statement(&mut self) -> Result<Stmt, ParseError> {
         let start = self.expect(TokenKind::From)?.range.start();
         let mut level = 0;
-        while self.eat(TokenKind::Dot) {
-            level += 1;
+        loop {
+            if self.eat(TokenKind::Dot) {
+                level += 1;
+            } else if self.eat(TokenKind::Ellipsis) {
+                level += 3;
+            } else {
+                break;
+            }
         }
         let module = if self.at(TokenKind::Name) { Some(self.dotted_name()?.into()) } else { None };
         self.expect(TokenKind::Import)?;
@@ -802,13 +817,13 @@ impl<'src> Parser<'src> {
     fn delete_statement(&mut self) -> Result<Stmt, ParseError> {
         let start = self.expect(TokenKind::Del)?.range.start();
         let first = self.expression(0)?;
-        let targets = if self.at(TokenKind::Comma) { self.comma_expression(first)? } else { first };
-        let targets = match targets {
-            Expr::Tuple(node) => {
-                node.elts.into_iter().map(mark_delete).collect::<Result<Vec<_>, _>>()?
+        let mut targets = vec![mark_delete(first)?];
+        while self.eat(TokenKind::Comma) {
+            if self.at_line_end() {
+                break;
             }
-            other => vec![mark_delete(other)?],
-        };
+            targets.push(mark_delete(self.expression(0)?)?);
+        }
         let end = targets.last().map(Ranged::range).unwrap_or_else(|| self.previous().range).end();
         self.consume_line_end();
         Ok(Stmt::Delete(StmtDelete { range: TextRange::new(start, end), targets }))
@@ -831,12 +846,14 @@ impl<'src> Parser<'src> {
                 .unwrap_or_else(|| annotation.range())
                 .end();
             self.consume_line_end();
+            let simple = matches!(target, Expr::Name(_))
+                && !self.grouped_expressions.contains(&target.range());
             return Ok(Stmt::AnnAssign(StmtAnnAssign {
                 range: TextRange::new(first_start, end),
                 target: Box::new(target),
                 annotation,
                 value,
-                simple: true,
+                simple,
             }));
         }
         if let Some(op) = aug_operator(self.current().kind) {
@@ -1016,29 +1033,230 @@ impl<'src> Parser<'src> {
     }
 
     fn pattern(&mut self) -> Result<Pattern, ParseError> {
-        let previous = self.stop_pattern_guard;
-        self.stop_pattern_guard = true;
-        let first = self.expression(0)?;
-        let expression =
-            if self.at(TokenKind::Comma) { self.comma_expression(first)? } else { first };
-        self.stop_pattern_guard = previous;
-        let pattern = pattern_from_expr(expression);
+        let start = self.current().range.start();
+        let first = self.pattern_atom()?;
+        let mut patterns = vec![first];
+        while self.eat(TokenKind::Vbar) {
+            patterns.push(self.pattern_atom()?);
+        }
+        let mut pattern = if patterns.len() == 1 {
+            patterns
+                .pop()
+                .unwrap_or(Pattern::Invalid(PatternInvalid { range: TextRange::empty(start) }))
+        } else {
+            let end = patterns.last().map(Ranged::range).unwrap_or_default().end();
+            Pattern::Or(PatternOr { range: TextRange::new(start, end), patterns })
+        };
         if self.eat(TokenKind::As) {
             let name = self.expect(TokenKind::Name)?;
             let range = TextRange::new(pattern.range().start(), name.range.end());
-            if self.eat(TokenKind::Comma) {
-                while !matches!(self.current().kind, TokenKind::Colon | TokenKind::EndMarker) {
-                    self.bump();
-                }
-            }
-            Ok(Pattern::As(PatternAs {
+            pattern = Pattern::As(PatternAs {
                 range,
                 pattern: Some(Box::new(pattern)),
                 name: Some(self.name_text(name).to_owned().into()),
-            }))
-        } else {
-            Ok(pattern)
+            });
         }
+        Ok(pattern)
+    }
+
+    fn case_pattern(&mut self) -> Result<Pattern, ParseError> {
+        let first = self.pattern()?;
+        if !self.eat(TokenKind::Comma) {
+            return Ok(first);
+        }
+        let start = first.range().start();
+        let mut patterns = vec![first];
+        while !matches!(
+            self.current().kind,
+            TokenKind::Colon | TokenKind::If | TokenKind::EndMarker
+        ) {
+            patterns.push(self.pattern()?);
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+        let end = patterns.last().map(Ranged::range).unwrap_or_default().end();
+        Ok(Pattern::Sequence(PatternSequence { range: TextRange::new(start, end), patterns }))
+    }
+
+    fn pattern_atom(&mut self) -> Result<Pattern, ParseError> {
+        let start = self.current().range.start();
+        match self.current().kind {
+            TokenKind::Name if self.word_is("_") => {
+                self.bump();
+                Ok(Pattern::As(PatternAs {
+                    range: self.previous().range,
+                    pattern: None,
+                    name: None,
+                }))
+            }
+            TokenKind::Name
+                if self.peek_kind(1) == TokenKind::LPar || self.peek_kind(1) == TokenKind::Dot =>
+            {
+                let cls = self.pattern_dotted_expression()?;
+                if self.eat(TokenKind::LPar) {
+                    self.class_pattern(start, cls)
+                } else {
+                    Ok(Pattern::Value(PatternValue { range: cls.range(), value: cls }))
+                }
+            }
+            TokenKind::Name => {
+                let token = self.bump();
+                Ok(Pattern::As(PatternAs {
+                    range: token.range,
+                    pattern: None,
+                    name: Some(self.name_text(token).to_owned().into()),
+                }))
+            }
+            TokenKind::LSqb => self.sequence_pattern(),
+            TokenKind::LBrace => self.mapping_pattern(),
+            TokenKind::LPar => {
+                self.bump();
+                if self.at(TokenKind::RPar) {
+                    let end = self.bump().range.end();
+                    return Ok(Pattern::Sequence(PatternSequence {
+                        range: TextRange::new(start, end),
+                        patterns: Vec::new(),
+                    }));
+                }
+                let first = self.pattern()?;
+                if !self.eat(TokenKind::Comma) {
+                    self.expect(TokenKind::RPar)?;
+                    return Ok(first);
+                }
+                let mut patterns = vec![first];
+                while !self.at(TokenKind::RPar) && !self.at(TokenKind::EndMarker) {
+                    patterns.push(self.pattern()?);
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                }
+                let end = self.expect(TokenKind::RPar)?.range.end();
+                Ok(Pattern::Sequence(PatternSequence {
+                    range: TextRange::new(start, end),
+                    patterns,
+                }))
+            }
+            TokenKind::Star => {
+                let token = self.bump();
+                let name = self.expect(TokenKind::Name)?;
+                Ok(Pattern::Star(PatternStar {
+                    range: TextRange::new(token.range.start(), name.range.end()),
+                    name: if self.name_text(name) == "_" {
+                        None
+                    } else {
+                        Some(self.name_text(name).to_owned().into())
+                    },
+                }))
+            }
+            TokenKind::True | TokenKind::False | TokenKind::None => {
+                let token = self.bump();
+                let value = match token.kind {
+                    TokenKind::True | TokenKind::False => Expr::BooleanLiteral(ExprBoolean {
+                        range: token.range,
+                        value: token.kind == TokenKind::True,
+                    }),
+                    _ => Expr::NoneLiteral(ExprLiteral { range: token.range }),
+                };
+                Ok(Pattern::Singleton(PatternSingleton { range: token.range, value }))
+            }
+            _ => {
+                let value = self.pattern_value_expression()?;
+                let range = value.range();
+                Ok(Pattern::Value(PatternValue { range, value }))
+            }
+        }
+    }
+
+    fn pattern_value_expression(&mut self) -> Result<Expr, ParseError> {
+        self.expression(6)
+    }
+
+    fn pattern_dotted_expression(&mut self) -> Result<Expr, ParseError> {
+        let token = self.expect(TokenKind::Name)?;
+        let mut expression = Expr::Name(ExprName {
+            range: token.range,
+            id: normalize_identifier(self.name_text(token)),
+            ctx: ExprContext::Load,
+        });
+        while self.eat(TokenKind::Dot) {
+            let name = self.expect(TokenKind::Name)?;
+            let range = TextRange::new(expression.range().start(), name.range.end());
+            expression = Expr::Attribute(ExprAttribute {
+                range,
+                value: Box::new(expression),
+                attr: normalize_identifier(self.name_text(name)),
+                ctx: ExprContext::Load,
+            });
+        }
+        Ok(expression)
+    }
+
+    fn sequence_pattern(&mut self) -> Result<Pattern, ParseError> {
+        let start = self.expect(TokenKind::LSqb)?.range.start();
+        let mut patterns = Vec::new();
+        while !self.at(TokenKind::RSqb) && !self.at(TokenKind::EndMarker) {
+            patterns.push(self.pattern()?);
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+        let end = self.expect(TokenKind::RSqb)?.range.end();
+        Ok(Pattern::Sequence(PatternSequence { range: TextRange::new(start, end), patterns }))
+    }
+
+    fn mapping_pattern(&mut self) -> Result<Pattern, ParseError> {
+        let start = self.expect(TokenKind::LBrace)?.range.start();
+        let mut keys = Vec::new();
+        let mut patterns = Vec::new();
+        let mut rest = None;
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::EndMarker) {
+            if self.eat(TokenKind::DoubleStar) {
+                let name = self.expect(TokenKind::Name)?;
+                rest = Some(self.name_text(name).to_owned().into());
+            } else {
+                keys.push(self.pattern_value_expression()?);
+                self.expect(TokenKind::Colon)?;
+                patterns.push(self.pattern()?);
+            }
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+        let end = self.expect(TokenKind::RBrace)?.range.end();
+        Ok(Pattern::Mapping(PatternMapping {
+            range: TextRange::new(start, end),
+            keys,
+            patterns,
+            rest,
+        }))
+    }
+
+    fn class_pattern(&mut self, start: TextSize, cls: Expr) -> Result<Pattern, ParseError> {
+        let mut positional = Vec::new();
+        let mut kwd_attrs = Vec::new();
+        let mut kwd_patterns = Vec::new();
+        while !self.at(TokenKind::RPar) && !self.at(TokenKind::EndMarker) {
+            if self.at(TokenKind::Name) && self.peek_kind(1) == TokenKind::Equal {
+                let attr = self.bump();
+                self.bump();
+                kwd_attrs.push(self.name_text(attr).to_owned().into());
+                kwd_patterns.push(self.pattern()?);
+            } else {
+                positional.push(self.pattern()?);
+            }
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+        let end = self.expect(TokenKind::RPar)?.range.end();
+        Ok(Pattern::Class(PatternClass {
+            range: TextRange::new(start, end),
+            cls,
+            patterns: positional,
+            kwd_attrs,
+            kwd_patterns,
+        }))
     }
 
     fn type_parameters(&mut self) -> Result<Vec<TypeParam>, ParseError> {
@@ -1114,13 +1332,18 @@ impl<'src> Parser<'src> {
     }
 
     fn expression(&mut self, minimum: u8) -> Result<Expr, ParseError> {
+        if self.expression_nodes >= self.options.max_nodes {
+            return Err(ParseError::too_many_nodes(self.current().range));
+        }
+        self.expression_nodes += 1;
         if self.enter_depth()? {
             return Err(ParseError::too_deep(self.current().range));
         }
         let mut left = self.prefix_expression()?;
+        let mut chain_depth = 0u32;
         loop {
             let kind = self.current().kind;
-            if kind == TokenKind::If && minimum <= 1 && !self.stop_pattern_guard {
+            if kind == TokenKind::If && minimum <= 1 {
                 self.bump();
                 let test = self.expression(0)?;
                 self.expect(TokenKind::Else)?;
@@ -1140,7 +1363,7 @@ impl<'src> Parser<'src> {
                 let range = TextRange::new(left.range().start(), value.range().end());
                 left = Expr::NamedExpr(ExprNamedExpr {
                     range,
-                    target: Box::new(left),
+                    target: Box::new(mark_store(left)?),
                     value: Box::new(value),
                 });
                 continue;
@@ -1165,9 +1388,13 @@ impl<'src> Parser<'src> {
                     let mut ops = Vec::new();
                     let mut comparators = Vec::new();
                     if let Expr::Compare(existing) = left {
-                        ops = existing.ops;
-                        comparators = existing.comparators;
-                        left = *existing.left;
+                        if self.grouped_expressions.contains(&existing.range) {
+                            left = Expr::Compare(existing);
+                        } else {
+                            ops = existing.ops;
+                            comparators = existing.comparators;
+                            left = *existing.left;
+                        }
                     }
                     ops.push(operator);
                     comparators.push(right);
@@ -1189,6 +1416,10 @@ impl<'src> Parser<'src> {
             };
             if precedence < minimum {
                 break;
+            }
+            chain_depth = chain_depth.saturating_add(1);
+            if chain_depth > self.options.max_depth {
+                return Err(ParseError::too_deep(self.current().range));
             }
             self.bump();
             let right = self.expression(if right_assoc { precedence } else { precedence + 1 })?;
@@ -1215,11 +1446,15 @@ impl<'src> Parser<'src> {
         let right = right?;
         let range = TextRange::new(left.range().start(), right.range().end());
         let mut values = match left {
-            Expr::BoolOp(node) if node.op == op => node.values,
+            Expr::BoolOp(node)
+                if node.op == op && !self.grouped_expressions.contains(&node.range) =>
+            {
+                node.values
+            }
             other => vec![other],
         };
         if let Expr::BoolOp(node) = right {
-            if node.op == op {
+            if node.op == op && !self.grouped_expressions.contains(&node.range) {
                 values.extend(node.values);
             } else {
                 values.push(Expr::BoolOp(node));
@@ -1250,7 +1485,7 @@ impl<'src> Parser<'src> {
                     TokenKind::Tilde => UnaryOperator::Invert,
                     _ => UnaryOperator::Not,
                 };
-                let operand = self.expression(if op == UnaryOperator::Not { 4 } else { 6 })?;
+                let operand = self.expression(if op == UnaryOperator::Not { 4 } else { 11 })?;
                 Expr::UnaryOp(ExprUnaryOp {
                     range: TextRange::new(token.range.start(), operand.range().end()),
                     op,
@@ -1274,9 +1509,21 @@ impl<'src> Parser<'src> {
                     ) {
                     None
                 } else if self.eat(TokenKind::From) {
-                    Some((true, self.expression(0)?))
+                    let first = self.expression(0)?;
+                    let value = if self.at(TokenKind::Comma) {
+                        self.comma_expression(first)?
+                    } else {
+                        first
+                    };
+                    Some((true, value))
                 } else {
-                    Some((false, self.expression(0)?))
+                    let first = self.expression(0)?;
+                    let value = if self.at(TokenKind::Comma) {
+                        self.comma_expression(first)?
+                    } else {
+                        first
+                    };
+                    Some((false, value))
                 };
                 match value {
                     Some((from, value)) => {
@@ -1345,9 +1592,6 @@ impl<'src> Parser<'src> {
                 let mut items = first.into_iter().collect::<Vec<_>>();
                 let mut tuple = false;
                 loop {
-                    if self.stop_pattern_guard && self.eat(TokenKind::As) {
-                        self.expect(TokenKind::Name)?;
-                    }
                     if !self.eat(TokenKind::Comma) {
                         break;
                     }
@@ -1365,10 +1609,12 @@ impl<'src> Parser<'src> {
                         ctx: ExprContext::Load,
                     }))
                 } else {
-                    Ok(items.pop().unwrap_or(Expr::Invalid(ExprInvalid {
+                    let expression = items.pop().unwrap_or(Expr::Invalid(ExprInvalid {
                         range: token.range,
                         message: "empty expression".into(),
-                    })))
+                    }));
+                    self.grouped_expressions.insert(expression.range());
+                    Ok(expression)
                 }
             }
             TokenKind::LSqb => {
@@ -1539,9 +1785,14 @@ impl<'src> Parser<'src> {
     }
 
     fn postfix(&mut self, mut expression: Expr) -> Result<Expr, ParseError> {
+        let mut chain_depth = 0u32;
         loop {
             match self.current().kind {
                 TokenKind::Dot => {
+                    chain_depth = chain_depth.saturating_add(1);
+                    if chain_depth > self.options.max_depth {
+                        return Err(ParseError::too_deep(self.current().range));
+                    }
                     self.bump();
                     let name = self.expect(TokenKind::Name)?;
                     let attr = normalize_identifier(self.name_text(name));
@@ -1554,6 +1805,10 @@ impl<'src> Parser<'src> {
                     });
                 }
                 TokenKind::LPar => {
+                    chain_depth = chain_depth.saturating_add(1);
+                    if chain_depth > self.options.max_depth {
+                        return Err(ParseError::too_deep(self.current().range));
+                    }
                     let start = expression.range().start();
                     self.bump();
                     let mut args = Vec::new();
@@ -1579,9 +1834,6 @@ impl<'src> Parser<'src> {
                                 let generators = self.generators()?;
                                 generator_arg = Some((value, generators));
                                 break;
-                            }
-                            if self.stop_pattern_guard && self.eat(TokenKind::As) {
-                                self.expect(TokenKind::Name)?;
                             }
                             if let Expr::Name(node) = &value {
                                 if self.eat(TokenKind::Equal) {
@@ -1623,38 +1875,48 @@ impl<'src> Parser<'src> {
                     }));
                 }
                 TokenKind::LSqb => {
+                    chain_depth = chain_depth.saturating_add(1);
+                    if chain_depth > self.options.max_depth {
+                        return Err(ParseError::too_deep(self.current().range));
+                    }
                     let start = expression.range().start();
                     self.bump();
                     let mut slices = Vec::new();
+                    let mut tuple = false;
                     if !self.at(TokenKind::RSqb) {
                         loop {
                             slices.push(self.subscript_item(start)?);
-                            if !self.eat(TokenKind::Comma) || self.at(TokenKind::RSqb) {
+                            if !self.eat(TokenKind::Comma) {
+                                break;
+                            }
+                            tuple = true;
+                            if self.at(TokenKind::RSqb) {
                                 break;
                             }
                         }
                     }
                     let end = self.expect(TokenKind::RSqb)?.range.end();
-                    let slice = if slices.len() == 1 {
-                        slices.pop().unwrap_or(Expr::Invalid(ExprInvalid {
-                            range: TextRange::new(start, end),
-                            message: "empty subscript".into(),
-                        }))
-                    } else if slices.is_empty() {
-                        Expr::Invalid(ExprInvalid {
-                            range: TextRange::new(start, end),
-                            message: "empty subscript".into(),
-                        })
-                    } else {
-                        Expr::Tuple(ExprSequence {
-                            range: TextRange::new(
-                                slices.first().map(Ranged::range).unwrap_or_default().start(),
-                                slices.last().map(Ranged::range).unwrap_or_default().end(),
-                            ),
-                            elts: slices,
-                            ctx: ExprContext::Load,
-                        })
-                    };
+                    let slice =
+                        if slices.len() == 1 && !tuple && !matches!(slices[0], Expr::Starred(_)) {
+                            slices.pop().unwrap_or(Expr::Invalid(ExprInvalid {
+                                range: TextRange::new(start, end),
+                                message: "empty subscript".into(),
+                            }))
+                        } else if slices.is_empty() {
+                            Expr::Invalid(ExprInvalid {
+                                range: TextRange::new(start, end),
+                                message: "empty subscript".into(),
+                            })
+                        } else {
+                            Expr::Tuple(ExprSequence {
+                                range: TextRange::new(
+                                    slices.first().map(Ranged::range).unwrap_or_default().start(),
+                                    slices.last().map(Ranged::range).unwrap_or_default().end(),
+                                ),
+                                elts: slices,
+                                ctx: ExprContext::Load,
+                            })
+                        };
                     expression = Expr::Subscript(ExprSubscript {
                         range: TextRange::new(start, end),
                         value: Box::new(expression),
@@ -1790,13 +2052,30 @@ impl<'src> Parser<'src> {
             parts.push(self.string_part(next, prefix, triple));
             end = next.range.end();
         }
-        if prefix.is_format() {
+        if parts.iter().any(|part| part.flags.prefix.is_format()) {
             let mut values = Vec::new();
             for part in parts {
-                if let Expr::FString(node) =
-                    parse_fstring(self.src, part.range, &part.value, self.options.version)
-                {
-                    values.extend(node.values);
+                if part.flags.prefix.is_format() {
+                    if let Expr::FString(node) = parse_fstring(
+                        self.src,
+                        part.range,
+                        &part.value,
+                        part.flags.prefix.is_raw(),
+                        part.flags.triple,
+                        self.options.version,
+                    )? {
+                        for value in node.values {
+                            append_fstring_value(&mut values, value);
+                        }
+                    }
+                } else if !part.value.is_empty() {
+                    append_fstring_value(
+                        &mut values,
+                        Expr::StringLiteral(ExprString {
+                            range: part.range,
+                            value: StringLiteralValue::new(vec![part]),
+                        }),
+                    );
                 }
             }
             return Ok(Expr::FString(ExprFString { range: TextRange::new(start, end), values }));
@@ -1824,7 +2103,8 @@ impl<'src> Parser<'src> {
         let delimiter = if triple { 3 } else { 1 };
         let value_end = raw.len().saturating_sub(delimiter);
         let value = raw.get(quote_index + delimiter..value_end).unwrap_or("");
-        let value = if prefix.is_raw() { value.to_owned() } else { unescape(value) };
+        let value =
+            if prefix.is_raw() || prefix.is_format() { value.to_owned() } else { unescape(value) };
         StringLiteralPart {
             range: token.range,
             flags: StringFlags {
@@ -1881,7 +2161,7 @@ impl<'src> Parser<'src> {
         self.at(TokenKind::For)
             || (self.at(TokenKind::Async) && self.peek_kind(1) == TokenKind::For)
     }
-    fn has_top_level_comma(&self) -> bool {
+    fn has_top_level_with_separator(&self) -> bool {
         if !self.at(TokenKind::LPar) {
             return false;
         }
@@ -1896,7 +2176,7 @@ impl<'src> Parser<'src> {
                     }
                 }
                 TokenKind::RSqb | TokenKind::RBrace => depth = depth.saturating_sub(1),
-                TokenKind::Comma if depth == 1 => return true,
+                TokenKind::Comma | TokenKind::As if depth == 1 => return true,
                 _ => {}
             }
         }
@@ -1991,20 +2271,118 @@ impl<'src> Parser<'src> {
 
 fn unescape(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
-    let mut chars = value.chars();
+    let mut chars = value.chars().peekable();
     while let Some(character) = chars.next() {
         if character != '\\' {
             output.push(character);
             continue;
         }
         match chars.next() {
+            Some('a') => output.push('\x07'),
+            Some('b') => output.push('\x08'),
+            Some('f') => output.push('\x0c'),
             Some('n') => output.push('\n'),
             Some('r') => output.push('\r'),
             Some('t') => output.push('\t'),
-            Some('0') => output.push('\0'),
+            Some('v') => output.push('\x0b'),
+            Some('\n') => {}
+            Some('\r') => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+            }
+            Some(character @ '0'..='7') => {
+                let mut digits = String::with_capacity(3);
+                digits.push(character);
+                for _ in 0..2 {
+                    let Some(&next) = chars.peek() else { break };
+                    if !matches!(next, '0'..='7') {
+                        break;
+                    }
+                    digits.push(next);
+                    chars.next();
+                }
+                if let Ok(value) =
+                    u32::from_str_radix(&digits, 8).ok().and_then(char::from_u32).ok_or(())
+                {
+                    output.push(value);
+                } else {
+                    output.push('\\');
+                    output.push_str(&digits);
+                }
+            }
             Some('\\') => output.push('\\'),
             Some('\'') => output.push('\''),
             Some('"') => output.push('"'),
+            Some('x') => {
+                let digits = take_escape_digits(&mut chars, 2);
+                if digits.len() == 2 {
+                    if let Ok(byte) = u8::from_str_radix(&digits, 16) {
+                        output.push(char::from(byte));
+                    } else {
+                        output.push_str("\\x");
+                        output.push_str(&digits);
+                    }
+                } else {
+                    output.push_str("\\x");
+                    output.push_str(&digits);
+                }
+            }
+            Some('u') => {
+                let digits = take_escape_digits(&mut chars, 4);
+                if digits.len() == 4 {
+                    if let Ok(value) =
+                        u32::from_str_radix(&digits, 16).ok().and_then(char::from_u32).ok_or(())
+                    {
+                        output.push(value);
+                    } else {
+                        output.push_str("\\u");
+                        output.push_str(&digits.to_ascii_lowercase());
+                    }
+                } else {
+                    output.push_str("\\u");
+                    output.push_str(&digits.to_ascii_lowercase());
+                }
+            }
+            Some('U') => {
+                let digits = take_escape_digits(&mut chars, 8);
+                if digits.len() == 8 {
+                    if let Ok(value) =
+                        u32::from_str_radix(&digits, 16).ok().and_then(char::from_u32).ok_or(())
+                    {
+                        output.push(value);
+                    } else {
+                        output.push_str("\\U");
+                        output.push_str(&digits.to_ascii_lowercase());
+                    }
+                } else {
+                    output.push_str("\\U");
+                    output.push_str(&digits.to_ascii_lowercase());
+                }
+            }
+            Some('N') => {
+                let mut name = String::new();
+                if chars.next() == Some('{') {
+                    for next in chars.by_ref() {
+                        if next == '}' {
+                            break;
+                        }
+                        name.push(next);
+                    }
+                    if let Some(character) = unicode_names2::character(&name) {
+                        output.push(character);
+                    } else {
+                        output.push('\\');
+                        output.push('N');
+                        output.push('{');
+                        output.push_str(&name);
+                        output.push('}');
+                    }
+                } else {
+                    output.push('\\');
+                    output.push('N');
+                }
+            }
             Some(other) => {
                 output.push('\\');
                 output.push(other);
@@ -2015,49 +2393,65 @@ fn unescape(value: &str) -> String {
     output
 }
 
+fn append_fstring_value(values: &mut Vec<Expr>, value: Expr) {
+    if let Expr::StringLiteral(current) = value {
+        if let Some(Expr::StringLiteral(previous)) = values.last_mut() {
+            previous.range = TextRange::new(previous.range.start(), current.range.end());
+            previous.value.parts.extend(current.value.parts);
+            return;
+        }
+        values.push(Expr::StringLiteral(current));
+    } else {
+        values.push(value);
+    }
+}
+
+fn take_escape_digits(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    count: usize,
+) -> String {
+    let mut digits = String::new();
+    for _ in 0..count {
+        let Some(&character) = chars.peek() else { break };
+        if !character.is_ascii_hexdigit() {
+            break;
+        }
+        digits.push(character);
+        chars.next();
+    }
+    digits
+}
+
+fn is_unicode_name_brace(value: &str, index: usize) -> bool {
+    let bytes = value.as_bytes();
+    if index < 2 || bytes[index - 1] != b'N' {
+        return false;
+    }
+    let mut slash_count = 0;
+    let mut cursor = index - 2;
+    loop {
+        if bytes[cursor] != b'\\' {
+            break;
+        }
+        slash_count += 1;
+        if cursor == 0 {
+            break;
+        }
+        cursor -= 1;
+    }
+    slash_count % 2 == 1
+}
+
 fn normalize_identifier(value: &str) -> Box<str> {
     if !cfg!(feature = "nfkc") || value.is_ascii() {
         return value.into();
     }
-    let mut normalized = String::with_capacity(value.len());
-    for character in value.chars() {
-        let replacement = match character {
-            'ａ'..='ｚ' | 'Ａ'..='Ｚ' | '０'..='９' => {
-                char::from_u32(character as u32 - 0xfee0).unwrap_or(character)
-            }
-            '　' => ' ',
-            'ｱ' => 'ア',
-            'ｲ' => 'イ',
-            'ｳ' => 'ウ',
-            'ｴ' => 'エ',
-            'ｵ' => 'オ',
-            'ﬀ' => 'f',
-            'ﬁ' => 'f',
-            'ﬂ' => 'f',
-            'ﬃ' => 'f',
-            'ﬄ' => 'f',
-            'ﬅ' => 's',
-            'ﬆ' => 's',
-            _ => character,
-        };
-        normalized.push(replacement);
-        match character {
-            'ﬀ' => normalized.push('f'),
-            'ﬁ' => normalized.push('i'),
-            'ﬂ' => normalized.push('l'),
-            'ﬃ' => {
-                normalized.push('f');
-                normalized.push('i');
-            }
-            'ﬄ' => {
-                normalized.push('f');
-                normalized.push('l');
-            }
-            'ﬅ' | 'ﬆ' => normalized.push('t'),
-            _ => {}
-        }
+    #[cfg(feature = "nfkc")]
+    {
+        value.nfkc().collect::<String>().into_boxed_str()
     }
-    normalized.into_boxed_str()
+    #[cfg(not(feature = "nfkc"))]
+    value.into()
 }
 
 fn mark_store(expression: Expr) -> Result<Expr, ParseError> {
@@ -2121,66 +2515,6 @@ fn mark_delete(expression: Expr) -> Result<Expr, ParseError> {
     }
 }
 
-fn pattern_from_expr(expression: Expr) -> Pattern {
-    let range = expression.range();
-    match expression {
-        Expr::Name(node) if node.id.as_ref() == "_" => {
-            Pattern::As(PatternAs { range, pattern: None, name: None })
-        }
-        Expr::Name(node) => Pattern::As(PatternAs { range, pattern: None, name: Some(node.id) }),
-        Expr::BooleanLiteral(_) | Expr::NoneLiteral(_) => {
-            Pattern::Singleton(PatternSingleton { range, value: expression })
-        }
-        Expr::Starred(node) => {
-            let name = match *node.value {
-                Expr::Name(name) => Some(name.id),
-                _ => None,
-            };
-            Pattern::Star(PatternStar { range, name })
-        }
-        Expr::List(node) | Expr::Tuple(node) => Pattern::Sequence(PatternSequence {
-            range,
-            patterns: node.elts.into_iter().map(pattern_from_expr).collect(),
-        }),
-        Expr::Dict(node) => {
-            let mut keys = Vec::new();
-            let mut patterns = Vec::new();
-            let mut rest = None;
-            for (key, value) in node.keys.into_iter().zip(node.values) {
-                if let Some(key) = key {
-                    keys.push(key);
-                    patterns.push(pattern_from_expr(value));
-                } else if let Expr::Name(name) = value {
-                    rest = Some(name.id);
-                }
-            }
-            Pattern::Mapping(PatternMapping { range, keys, patterns, rest })
-        }
-        Expr::Call(node) => {
-            let mut kwd_attrs = Vec::new();
-            let mut kwd_patterns = Vec::new();
-            for keyword in node.keywords {
-                if let Some(arg) = keyword.arg {
-                    kwd_attrs.push(arg);
-                    kwd_patterns.push(pattern_from_expr(keyword.value));
-                }
-            }
-            Pattern::Class(PatternClass {
-                range,
-                cls: *node.func,
-                patterns: node.args.into_iter().map(pattern_from_expr).collect(),
-                kwd_attrs,
-                kwd_patterns,
-            })
-        }
-        Expr::BinOp(node) if node.op == BinaryOperator::BitOr => {
-            let patterns = vec![pattern_from_expr(*node.left), pattern_from_expr(*node.right)];
-            Pattern::Or(PatternOr { range, patterns })
-        }
-        other => Pattern::Value(PatternValue { range, value: other }),
-    }
-}
-
 fn binary_operator(kind: TokenKind) -> Option<(BinaryOperator, u8, bool)> {
     Some(match kind {
         TokenKind::Vbar => (BinaryOperator::BitOr, 5, false),
@@ -2233,13 +2567,23 @@ fn compare_operator(parser: &Parser<'_>, kind: TokenKind) -> Option<(CompareOper
     }
 }
 
-fn parse_fstring(_src: &str, range: TextRange, value: &str, version: PythonVersion) -> Expr {
+fn parse_fstring(
+    _src: &str,
+    range: TextRange,
+    value: &str,
+    raw: bool,
+    _triple: bool,
+    version: PythonVersion,
+) -> Result<Expr, ParseError> {
     let mut values = Vec::new();
     let mut literal = String::new();
     let mut index = 0;
     let bytes = value.as_bytes();
     while index < bytes.len() {
-        if bytes[index] == b'{' && bytes.get(index + 1) != Some(&b'{') {
+        if bytes[index] == b'{'
+            && bytes.get(index + 1) != Some(&b'{')
+            && (raw || !is_unicode_name_brace(value, index))
+        {
             if !literal.is_empty() {
                 values.push(Expr::StringLiteral(ExprString {
                     range,
@@ -2250,33 +2594,58 @@ fn parse_fstring(_src: &str, range: TextRange, value: &str, version: PythonVersi
                             triple: false,
                             quote: '\'',
                         },
-                        value: std::mem::take(&mut literal).into(),
+                        value: if raw {
+                            std::mem::take(&mut literal).into()
+                        } else {
+                            unescape(&std::mem::take(&mut literal)).into()
+                        },
                     }]),
                 }));
             }
             let start = index + 1;
-            let mut end = start;
-            let mut depth = 1;
-            while end < bytes.len() && depth > 0 {
-                if bytes[end] == b'{' {
-                    depth += 1;
-                } else if bytes[end] == b'}' {
-                    depth -= 1;
-                }
-                end += 1;
-            }
-            let inner = value.get(start..end.saturating_sub(1)).unwrap_or("");
-            let (expression_text, conversion, format_spec) = split_fstring_field(inner);
-            if let Ok(expr) = parse_expression(expression_text) {
-                let format_spec =
-                    format_spec.map(|spec| Box::new(parse_fstring("", range, spec, version)));
-                values.push(Expr::FormattedValue(ExprFormattedValue {
+            let Some(field_end) = fstring_field_end(value, start) else {
+                return Err(ParseError::syntax(range, "unterminated f-string expression"));
+            };
+            let end = field_end + 1;
+            let inner = value.get(start..field_end).unwrap_or("");
+            let (expression_text, conversion, format_spec, debug_prefix) =
+                split_fstring_field(inner);
+            if !version.supports(PythonVersion::Py312) && has_unquoted_newline(expression_text) {
+                return Err(ParseError::syntax(
                     range,
-                    value: Box::new(expr),
-                    conversion,
-                    format_spec,
+                    "f-string expression cannot include a newline",
+                ));
+            }
+            if let Some(prefix) = debug_prefix {
+                let prefix = strip_fstring_comments(prefix);
+                values.push(Expr::StringLiteral(ExprString {
+                    range,
+                    value: StringLiteralValue::new(vec![StringLiteralPart {
+                        range,
+                        flags: StringFlags {
+                            prefix: Default::default(),
+                            triple: false,
+                            quote: '\'',
+                        },
+                        value: prefix.into(),
+                    }]),
                 }));
             }
+            let expression_text = normalize_fstring_expression(expression_text);
+            let expr = parse_expression(&expression_text)
+                .map_err(|error| ParseError::syntax(range, error.diagnostic.message))?;
+            let conversion =
+                if debug_prefix.is_some() && conversion.is_none() { Some('r') } else { conversion };
+            let format_spec = match format_spec {
+                Some(spec) => Some(Box::new(parse_fstring("", range, spec, raw, false, version)?)),
+                None => None,
+            };
+            values.push(Expr::FormattedValue(ExprFormattedValue {
+                range,
+                value: Box::new(expr),
+                conversion,
+                format_spec,
+            }));
             index = end;
         } else {
             if bytes[index] == b'{' && bytes.get(index + 1) == Some(&b'{') {
@@ -2297,23 +2666,185 @@ fn parse_fstring(_src: &str, range: TextRange, value: &str, version: PythonVersi
             value: StringLiteralValue::new(vec![StringLiteralPart {
                 range,
                 flags: StringFlags { prefix: Default::default(), triple: false, quote: '\'' },
-                value: literal.into(),
+                value: if raw { literal.into() } else { unescape(&literal).into() },
             }]),
         }));
     }
     let _ = version;
-    Expr::FString(ExprFString { range, values })
+    Ok(Expr::FString(ExprFString { range, values }))
 }
 
-fn split_fstring_field(field: &str) -> (&str, Option<char>, Option<&str>) {
+fn strip_fstring_comments(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' => {
+                let start = cursor;
+                skip_fstring_string(value, &mut cursor);
+                output.push_str(&value[start..cursor.min(value.len())]);
+            }
+            b'#' => {
+                while cursor < bytes.len() && !matches!(bytes[cursor], b'\n' | b'\r') {
+                    cursor += 1;
+                }
+            }
+            _ => {
+                let character = value[cursor..].chars().next().unwrap_or_default();
+                output.push(character);
+                cursor += character.len_utf8();
+            }
+        }
+    }
+    output
+}
+
+fn fstring_field_end(value: &str, start: usize) -> Option<usize> {
+    let bytes = value.as_bytes();
+    let mut depth = 1u32;
+    let mut format_spec = false;
+    let mut cursor = start;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(cursor);
+                }
+            }
+            b':' if depth == 1 => format_spec = true,
+            b'#' if !format_spec => {
+                while cursor < bytes.len() && !matches!(bytes[cursor], b'\n' | b'\r') {
+                    cursor += 1;
+                }
+                continue;
+            }
+            b'\'' | b'"' => {
+                skip_fstring_string(value, &mut cursor);
+                continue;
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn skip_fstring_string(value: &str, cursor: &mut usize) {
+    let bytes = value.as_bytes();
+    let quote = bytes[*cursor];
+    let triple =
+        bytes.get(*cursor..*cursor + 3) == Some(if quote == b'\'' { b"'''" } else { b"\"\"\"" });
+    let delimiter = if triple { 3 } else { 1 };
+    *cursor += delimiter;
+    while *cursor < bytes.len() {
+        if bytes[*cursor] == b'\\' {
+            *cursor += 1;
+            if *cursor < bytes.len() {
+                *cursor += 1;
+            }
+            continue;
+        }
+        if bytes.get(*cursor..*cursor + delimiter)
+            == Some(if quote == b'\'' {
+                if triple {
+                    b"'''"
+                } else {
+                    b"'"
+                }
+            } else if triple {
+                b"\"\"\""
+            } else {
+                b"\""
+            })
+        {
+            *cursor += delimiter;
+            return;
+        }
+        *cursor += value[*cursor..].chars().next().map_or(1, char::len_utf8);
+    }
+    *cursor = bytes.len();
+}
+
+fn has_unquoted_newline(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\n' | b'\r' => return true,
+            b'\'' | b'"' => {
+                skip_fstring_string(value, &mut cursor);
+                continue;
+            }
+            b'\\' => cursor += 1,
+            _ => {}
+        }
+        cursor += 1;
+    }
+    false
+}
+
+fn normalize_fstring_expression(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' => {
+                let start = cursor;
+                skip_fstring_string(value, &mut cursor);
+                output.push_str(&value[start..cursor.min(value.len())]);
+            }
+            b'#' => {
+                while cursor < bytes.len() && !matches!(bytes[cursor], b'\n' | b'\r') {
+                    cursor += 1;
+                }
+                output.push(' ');
+            }
+            b'\n' | b'\r' => {
+                output.push(' ');
+                cursor += 1;
+                if bytes.get(cursor.wrapping_sub(1)) == Some(&b'\r')
+                    && bytes.get(cursor) == Some(&b'\n')
+                {
+                    cursor += 1;
+                }
+            }
+            _ => {
+                let character = value[cursor..].chars().next().unwrap_or_default();
+                output.push(character);
+                cursor += character.len_utf8();
+            }
+        }
+    }
+    output.trim().to_owned()
+}
+
+fn split_fstring_field(field: &str) -> (&str, Option<char>, Option<&str>, Option<&str>) {
     let mut nesting = 0u32;
+    let mut debug_at = None;
     let mut conversion_at = None;
     let mut format_at = None;
     for (index, character) in field.char_indices() {
         match character {
             '[' | '(' | '{' => nesting += 1,
             ']' | ')' | '}' => nesting = nesting.saturating_sub(1),
-            '!' if nesting == 0 && conversion_at.is_none() => conversion_at = Some(index),
+            '=' if nesting == 0
+                && debug_at.is_none()
+                && field.as_bytes().get(index + 1) != Some(&b'=')
+                && field.as_bytes().get(index.wrapping_sub(1)) != Some(&b':')
+                && field[index + 1..].trim_start().is_empty_or_debug_suffix() =>
+            {
+                debug_at = Some(index);
+            }
+            '!' if nesting == 0
+                && conversion_at.is_none()
+                && field.as_bytes().get(index + 1) != Some(&b'=') =>
+            {
+                conversion_at = Some(index)
+            }
             ':' if nesting == 0 => {
                 format_at = Some(index);
                 break;
@@ -2321,9 +2852,23 @@ fn split_fstring_field(field: &str) -> (&str, Option<char>, Option<&str>) {
             _ => {}
         }
     }
-    let expression_end = conversion_at.or(format_at).unwrap_or(field.len());
+    let expression_end = debug_at.or(conversion_at).or(format_at).unwrap_or(field.len());
     let expression = field[..expression_end].trim();
     let conversion = conversion_at.and_then(|index| field[index + 1..].chars().next());
     let format_spec = format_at.map(|index| field[index + 1..].trim());
-    (expression, conversion, format_spec)
+    let debug_prefix = debug_at.map(|_| {
+        let end = conversion_at.or(format_at).unwrap_or(field.len());
+        &field[..end]
+    });
+    (expression, conversion, format_spec, debug_prefix)
+}
+
+trait FStringSuffix {
+    fn is_empty_or_debug_suffix(&self) -> bool;
+}
+
+impl FStringSuffix for str {
+    fn is_empty_or_debug_suffix(&self) -> bool {
+        self.is_empty() || self.starts_with(['!', ':', '#'])
+    }
 }
