@@ -55,6 +55,25 @@ fn type_statement_requires_python_312() {
 }
 
 #[test]
+fn decorator_expressions_require_python_309() {
+    let source = "@[factory]\ndef build():\n    pass\n";
+    let subscript = "@factory()[index]\ndef build():\n    pass\n";
+
+    assert_unsupported(source, PythonVersion::Py38);
+    assert_unsupported(subscript, PythonVersion::Py38);
+    assert_supported(source, PythonVersion::Py39);
+    assert_supported(subscript, PythonVersion::Py39);
+}
+
+#[test]
+fn type_parameter_defaults_require_python_313() {
+    let source = "def identity[T = int](value: T) -> T:\n    return value\n";
+
+    assert_unsupported(source, PythonVersion::Py312);
+    assert_supported(source, PythonVersion::Py313);
+}
+
+#[test]
 fn pep701_fstring_forms_require_python_312() {
     let same_quote = r#"value = f"{value["key"]}""#.to_owned() + "\n";
     let backslash = r#"value = f"{'\n'.join(items)}""#.to_owned() + "\n";
@@ -88,4 +107,13 @@ fn legacy_f_strings_remain_single_tokens_before_python_312() {
             .map(|token| token.kind)
             .collect::<Vec<_>>();
     assert!(kinds.iter().any(|kind| matches!(kind, TokenKind::FStringStart { .. })));
+}
+
+#[test]
+fn legacy_f_strings_handle_triple_quotes_and_escaped_braces() {
+    let triple_quote = r#"value = f"""{make_tag("rect")}""""#.to_owned() + "\n";
+    let escaped_braces = r#"value = f'int main() {{\n    {name}();\n}}\n'"#.to_owned() + "\n";
+
+    assert_supported(triple_quote.as_str(), PythonVersion::Py311);
+    assert_supported(escaped_braces.as_str(), PythonVersion::Py311);
 }

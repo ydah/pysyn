@@ -110,5 +110,11 @@ fn exercises_cli_success_and_failure_paths() {
     assert!(legacy_tokens.status.success());
     assert!(String::from_utf8_lossy(&legacy_tokens.stdout).contains("3 (1, 8) (1, 17)"));
     assert!(!run_cli(&["check", "-"], "value =\n").status.success());
+    let unsupported = run_cli(
+        &["check", "--target-version=3.9", "-"],
+        "match value:\n    case _:\n        pass\n",
+    );
+    assert!(!unsupported.status.success());
+    assert!(String::from_utf8_lossy(&unsupported.stderr).contains("UnsupportedSyntax"));
     assert!(!run_cli(&["unknown", "-"], "").status.success());
 }

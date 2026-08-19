@@ -133,9 +133,9 @@ fn parse_module(
             ..pysyn::ParseOptions::default()
         },
     );
-    if let Some(diagnostic) =
-        parsed.errors.into_iter().find(|diagnostic| diagnostic.severity == pysyn::Severity::Error)
-    {
+    if let Some(diagnostic) = parsed.errors.into_iter().find(|diagnostic| {
+        matches!(diagnostic.severity, pysyn::Severity::Error | pysyn::Severity::Unsupported)
+    }) {
         return Err(pysyn::ParseError { diagnostic });
     }
     Ok(parsed.module)

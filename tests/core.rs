@@ -89,6 +89,20 @@ fn parses_core_statements_and_marks_assignment_targets() {
 }
 
 #[test]
+fn await_binds_tighter_than_binary_operators() {
+    let module = pysyn::parse_module("async def wrapper():\n    return await foo() + 100\n")
+        .expect("valid await expression");
+    let Stmt::AsyncFunctionDef(function) = &module.body[0] else {
+        panic!("expected async function")
+    };
+    let Stmt::Return(return_statement) = &function.body[0] else { panic!("expected return") };
+    let Some(Expr::BinOp(binary)) = return_statement.value.as_deref() else {
+        panic!("expected binary expression")
+    };
+    assert!(matches!(binary.left.as_ref(), Expr::Await(_)));
+}
+
+#[test]
 fn recovers_invalid_source_without_panicking() {
     let parsed = parse(
         "def broken(:\n    pass\nnext = 1\n",
@@ -293,6 +307,8 @@ fn builds_match_pattern_variants() {
         "    case Point(x, y as point_y):\n        pass\n",
         "    case [*items]:\n        pass\n",
         "    case 0 | 1:\n        pass\n",
+        "    case None:\n        pass\n",
+        "    case True:\n        pass\n",
     );
     let module = pysyn::parse_module(source).expect("valid pattern source");
     let Stmt::Match(statement) = &module.body[0] else { panic!("expected match") };
@@ -300,6 +316,9 @@ fn builds_match_pattern_variants() {
     assert!(matches!(statement.cases[1].pattern, pysyn::ast::Pattern::Class(_)));
     assert!(matches!(statement.cases[2].pattern, pysyn::ast::Pattern::Sequence(_)));
     assert!(matches!(statement.cases[3].pattern, pysyn::ast::Pattern::Or(_)));
+    let dump = pysyn::printer::dump(&module, Default::default());
+    assert!(dump.contains("MatchSingleton(value=None"));
+    assert!(dump.contains("MatchSingleton(value=True"));
 }
 
 #[test]
@@ -446,6 +465,13 @@ fn bounds_deep_input_without_stack_overflow() {
     let source = format!("value = {}\n", "1+".repeat(10_000) + "1");
     let parsed = parse(&source, ParseOptions { max_depth: 32, ..ParseOptions::default() });
     assert!(parsed.errors.iter().any(|error| error.code == pysyn::DiagnosticCode::TooDeep));
+}
+
+#[test]
+fn caps_lexical_diagnostics_at_the_configured_error_limit() {
+    let source = "\0".repeat(1_000);
+    let parsed = parse(&source, ParseOptions { max_errors: 0, ..ParseOptions::default() });
+    assert!(parsed.errors.is_empty());
 }
 
 #[test]

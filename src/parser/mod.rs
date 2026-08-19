@@ -111,12 +111,17 @@ pub fn parse_module(src: &str) -> Result<ModModule, ParseError> {
 
 /// Parses one Python expression in strict mode.
 pub fn parse_expression(src: &str) -> Result<Expr, ParseError> {
+    parse_expression_at_version(src, PythonVersion::default())
+}
+
+fn parse_expression_at_version(src: &str, version: PythonVersion) -> Result<Expr, ParseError> {
     if src.len() > u32::MAX as usize {
         return Err(ParseError::source_too_large());
     }
     let options = ParseOptions {
         mode: SourceMode::Expression,
         keep_comments: false,
+        version,
         ..ParseOptions::default()
     };
     let mut parser = Parser::new(src, options);
@@ -190,7 +195,9 @@ pub fn parse(src: &str, options: ParseOptions) -> Parsed {
             }
         },
     };
-    parser.errors.extend(collect_invalid_escape_warnings(src, &parser.tokens));
+    for diagnostic in collect_invalid_escape_warnings(src, &parser.tokens) {
+        parser.push_error(diagnostic);
+    }
     let comments = if parser.options.keep_comments {
         std::mem::take(&mut parser.comments)
     } else {
@@ -361,7 +368,8 @@ impl<'src> Parser<'src> {
         {
             match item {
                 Ok(token) => tokens.push(token),
-                Err(error) => errors.push(error.diagnostic),
+                Err(error) if errors.len() < options.max_errors => errors.push(error.diagnostic),
+                Err(_) => {}
             }
         }
         if !matches!(tokens.last().map(|token| token.kind), Some(TokenKind::EndMarker)) {
@@ -476,7 +484,16 @@ impl<'src> Parser<'src> {
     fn decorated_statement(&mut self) -> Result<Stmt, ParseError> {
         let mut decorators = Vec::new();
         while self.eat(TokenKind::At) {
-            decorators.push(self.expression(0)?);
+            let decorator = self.expression(0)?;
+            if !self.options.version.supports(PythonVersion::Py39)
+                && !is_legacy_decorator(&decorator)
+            {
+                self.push_error(Diagnostic::unsupported(
+                    decorator.range(),
+                    "arbitrary decorator expressions require Python 3.9 or newer",
+                ));
+            }
+            decorators.push(decorator);
             self.expect(TokenKind::Newline)?;
         }
         let mut statement = match self.current().kind {
@@ -1670,7 +1687,19 @@ impl<'src> Parser<'src> {
             };
             let name_token = self.expect(TokenKind::Name)?;
             let bound = if self.eat(TokenKind::Colon) { Some(self.expression(0)?) } else { None };
-            let default = if self.eat(TokenKind::Equal) { Some(self.expression(0)?) } else { None };
+            let default = if self.eat(TokenKind::Equal) {
+                let default_start = self.previous().range.start();
+                let value = self.expression(0)?;
+                if !self.options.version.supports(PythonVersion::Py313) {
+                    self.push_error(Diagnostic::unsupported(
+                        TextRange::new(default_start, value.range().end()),
+                        "type parameter defaults require Python 3.13 or newer",
+                    ));
+                }
+                Some(value)
+            } else {
+                None
+            };
             let end = default
                 .as_ref()
                 .map(Ranged::range)
@@ -1914,7 +1943,8 @@ impl<'src> Parser<'src> {
             }
             TokenKind::Await => {
                 self.bump();
-                let value = self.expression(6)?;
+                let atom = self.atom()?;
+                let value = self.postfix(atom)?;
                 Expr::Await(ExprUnaryValue {
                     range: TextRange::new(token.range.start(), self.expression_range(&value).end()),
                     value: Some(Box::new(value)),
@@ -2375,7 +2405,10 @@ impl<'src> Parser<'src> {
                                 ));
                             }
                             args.push(Expr::Starred(ExprStarred {
-                                range: TextRange::new(star.range.start(), value.range().end()),
+                                range: TextRange::new(
+                                    star.range.start(),
+                                    self.expression_range(&value).end(),
+                                ),
                                 value: Box::new(value),
                                 ctx: ExprContext::Load,
                             }));
@@ -2800,9 +2833,11 @@ impl<'src> Parser<'src> {
         while cursor < value.len() {
             let Some(open) = value[cursor..].find('{') else { break };
             let open = cursor + open;
-            if value.as_bytes().get(open + 1) == Some(&b'{')
-                || (!value.is_empty() && is_unicode_name_brace(value, open))
-            {
+            if value.as_bytes().get(open + 1) == Some(&b'{') {
+                cursor = open + 2;
+                continue;
+            }
+            if !value.is_empty() && is_unicode_name_brace(value, open) {
                 cursor = open + 1;
                 continue;
             }
@@ -2812,7 +2847,13 @@ impl<'src> Parser<'src> {
             let expression = split_fstring_field(inner).expression;
             let field_range =
                 TextRange::from_usize(body_start + open, body_start + field_end.saturating_add(1));
-            if expression.contains(quote) {
+            let reuses_outer_quote = if triple {
+                let delimiter = [quote; 3].iter().collect::<String>();
+                expression.contains(&delimiter)
+            } else {
+                expression.contains(quote)
+            };
+            if reuses_outer_quote {
                 self.push_error(Diagnostic::unsupported(
                     field_range,
                     "f-string expressions cannot reuse the outer quote before Python 3.12",
@@ -3288,6 +3329,21 @@ fn mark_store(expression: Expr) -> Result<Expr, ParseError> {
     mark_store_target(expression, false)
 }
 
+fn is_legacy_decorator(expression: &Expr) -> bool {
+    match expression {
+        Expr::Call(node) => is_legacy_decorator_name(&node.func),
+        _ => is_legacy_decorator_name(expression),
+    }
+}
+
+fn is_legacy_decorator_name(expression: &Expr) -> bool {
+    match expression {
+        Expr::Name(_) => true,
+        Expr::Attribute(node) => is_legacy_decorator_name(&node.value),
+        _ => false,
+    }
+}
+
 fn mark_store_target(expression: Expr, in_sequence: bool) -> Result<Expr, ParseError> {
     match expression {
         Expr::Name(mut node) => {
@@ -3471,7 +3527,14 @@ fn parse_fstring(
     location_range: TextRange,
 ) -> Result<Expr, ParseError> {
     let value_start = fstring_body_start(src, range, triple);
-    parse_fstring_value(src, range, value, raw, version, value_start, location_range)
+    let locations = FStringLocationRanges { location: location_range, format_spec: range };
+    parse_fstring_value(src, range, value, raw, version, value_start, locations)
+}
+
+#[derive(Copy, Clone)]
+struct FStringLocationRanges {
+    location: TextRange,
+    format_spec: TextRange,
 }
 
 fn parse_fstring_value(
@@ -3481,7 +3544,7 @@ fn parse_fstring_value(
     raw: bool,
     version: PythonVersion,
     value_start: usize,
-    location_range: TextRange,
+    locations: FStringLocationRanges,
 ) -> Result<Expr, ParseError> {
     let value_start = value_start.min(src.len());
     let mut values = Vec::new();
@@ -3500,9 +3563,12 @@ fn parse_fstring_value(
                 let node_range = if version.supports(PythonVersion::Py312) {
                     literal_range
                 } else {
-                    location_range
+                    locations.location
                 };
-                values.push(fstring_literal(node_range, std::mem::take(&mut literal), raw));
+                append_fstring_value(
+                    &mut values,
+                    fstring_literal(node_range, std::mem::take(&mut literal), raw),
+                );
             }
             let start = index + 1;
             let Some(field_end) = fstring_field_end(value, start) else {
@@ -3515,6 +3581,7 @@ fn parse_fstring_value(
                 conversion,
                 conversion_tail,
                 format_spec,
+                format_spec_start,
                 debug_prefix,
                 has_conversion,
             } = split_fstring_field(inner);
@@ -3534,44 +3601,66 @@ fn parse_fstring_value(
                 ));
             }
             if let Some(prefix) = debug_prefix {
+                let prefix_length = prefix.len();
                 let prefix = strip_fstring_comments(prefix);
                 let prefix_range =
-                    TextRange::from_usize(value_start + start, value_start + start + prefix.len());
+                    TextRange::from_usize(value_start + start, value_start + start + prefix_length);
                 let node_range = if version.supports(PythonVersion::Py312) {
                     prefix_range
                 } else {
-                    location_range
+                    locations.location
                 };
-                values.push(Expr::StringLiteral(ExprString {
-                    range: node_range,
-                    value: StringLiteralValue::new(vec![StringLiteralPart {
+                append_fstring_value(
+                    &mut values,
+                    Expr::StringLiteral(ExprString {
                         range: node_range,
-                        flags: StringFlags {
-                            prefix: Default::default(),
-                            triple: false,
-                            quote: '\'',
-                        },
-                        value: prefix.into(),
-                    }]),
-                }));
+                        value: StringLiteralValue::new(vec![StringLiteralPart {
+                            range: node_range,
+                            flags: StringFlags {
+                                prefix: Default::default(),
+                                triple: false,
+                                quote: '\'',
+                            },
+                            value: prefix.into(),
+                        }]),
+                    }),
+                );
             }
             let expression_start = inner.find(expression_text).unwrap_or(0);
             let expression_text = normalize_fstring_expression(expression_text);
             let expression_offset = value_start + start + expression_start;
             let expression_source =
                 format!("({}{})", " ".repeat(expression_offset.saturating_sub(1)), expression_text);
-            let expr = parse_expression(&expression_source)
+            let expr = parse_expression_at_version(&expression_source, version)
                 .map_err(|error| ParseError::syntax(range, error.diagnostic.message))?;
-            let conversion =
-                if debug_prefix.is_some() && conversion.is_none() { Some('r') } else { conversion };
+            let expr = match expr {
+                Expr::Tuple(mut node) if node.range.start().raw() == 0 => {
+                    let tuple_start = if version.supports(PythonVersion::Py312) {
+                        expression_offset
+                    } else {
+                        value_start + index.saturating_sub(1)
+                    };
+                    let tuple_end =
+                        node.range.end().as_usize().saturating_sub(
+                            if version.supports(PythonVersion::Py312) { 1 } else { 0 },
+                        );
+                    node.range = TextRange::from_usize(tuple_start, tuple_end);
+                    Expr::Tuple(node)
+                }
+                expr => expr,
+            };
             let format_spec = match format_spec {
                 Some(spec) => {
-                    let spec_start = inner.find(spec).unwrap_or(inner.len());
+                    let spec_start = format_spec_start.unwrap_or(inner.len());
                     let spec_start = value_start + start + spec_start;
                     let spec_range = TextRange::from_usize(
                         spec_start.saturating_sub(1),
                         value_start + field_end,
                     );
+                    let spec_locations = FStringLocationRanges {
+                        location: locations.format_spec,
+                        format_spec: locations.format_spec,
+                    };
                     Some(Box::new(parse_fstring_value(
                         src,
                         spec_range,
@@ -3579,14 +3668,23 @@ fn parse_fstring_value(
                         raw,
                         version,
                         spec_start,
-                        location_range,
+                        spec_locations,
                     )?))
                 }
                 None => None,
             };
+            let conversion =
+                if debug_prefix.is_some() && conversion.is_none() && format_spec.is_none() {
+                    Some('r')
+                } else {
+                    conversion
+                };
             let field_range = TextRange::from_usize(value_start + index, value_start + end);
-            let node_range =
-                if version.supports(PythonVersion::Py312) { field_range } else { location_range };
+            let node_range = if version.supports(PythonVersion::Py312) {
+                field_range
+            } else {
+                locations.location
+            };
             values.push(Expr::FormattedValue(ExprFormattedValue {
                 range: node_range,
                 value: Box::new(expr),
@@ -3613,10 +3711,11 @@ fn parse_fstring_value(
         let literal_range =
             TextRange::from_usize(value_start + literal_start, value_start + value.len());
         let node_range =
-            if version.supports(PythonVersion::Py312) { literal_range } else { location_range };
-        values.push(fstring_literal(node_range, literal, raw));
+            if version.supports(PythonVersion::Py312) { literal_range } else { locations.location };
+        append_fstring_value(&mut values, fstring_literal(node_range, literal, raw));
     }
-    let fstring_range = if version.supports(PythonVersion::Py312) { range } else { location_range };
+    let fstring_range =
+        if version.supports(PythonVersion::Py312) { range } else { locations.location };
     Ok(Expr::FString(ExprFString { range: fstring_range, values }))
 }
 
@@ -3768,22 +3867,18 @@ fn normalize_fstring_expression(value: &str) -> String {
             }
             b'#' => {
                 while cursor < bytes.len() && !matches!(bytes[cursor], b'\n' | b'\r') {
-                    cursor += 1;
+                    let character = value[cursor..].chars().next().unwrap_or_default();
+                    output.extend(std::iter::repeat(' ').take(character.len_utf8()));
+                    cursor += character.len_utf8();
                 }
-                output.push(' ');
             }
             b'\n' | b'\r' => {
-                output.push(' ');
+                output.push(bytes[cursor] as char);
                 cursor += 1;
                 if bytes.get(cursor.wrapping_sub(1)) == Some(&b'\r')
                     && bytes.get(cursor) == Some(&b'\n')
                 {
-                    cursor += 1;
-                }
-            }
-            b'\\' if matches!(bytes.get(cursor + 1), Some(b'\n' | b'\r')) => {
-                cursor += 2;
-                if bytes.get(cursor - 1) == Some(&b'\r') && bytes.get(cursor) == Some(&b'\n') {
+                    output.push('\n');
                     cursor += 1;
                 }
             }
@@ -3794,7 +3889,7 @@ fn normalize_fstring_expression(value: &str) -> String {
             }
         }
     }
-    output.trim().to_owned()
+    output
 }
 
 struct FStringField<'a> {
@@ -3802,6 +3897,7 @@ struct FStringField<'a> {
     conversion: Option<char>,
     conversion_tail: Option<&'a str>,
     format_spec: Option<&'a str>,
+    format_spec_start: Option<usize>,
     debug_prefix: Option<&'a str>,
     has_conversion: bool,
 }
@@ -3855,7 +3951,8 @@ fn split_fstring_field(field: &str) -> FStringField<'_> {
         let end = format_at.unwrap_or(field.len());
         field.get(conversion_end..end).unwrap_or_default()
     });
-    let format_spec = format_at.map(|index| field[index + 1..].trim());
+    let format_spec = format_at.map(|index| &field[index + 1..]);
+    let format_spec_start = format_at.map(|index| index + 1);
     let debug_prefix = debug_at.map(|_| {
         let end = conversion_at.or(format_at).unwrap_or(field.len());
         &field[..end]
@@ -3865,6 +3962,7 @@ fn split_fstring_field(field: &str) -> FStringField<'_> {
         conversion,
         conversion_tail,
         format_spec,
+        format_spec_start,
         debug_prefix,
         has_conversion: conversion_at.is_some(),
     }
