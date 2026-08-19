@@ -97,9 +97,18 @@ fn exercises_cli_success_and_failure_paths() {
     assert!(run_cli(&["--version"], "").status.success());
     assert!(run_cli(&["check", "-"], "value = 1\n").status.success());
     assert!(run_cli(&["parse", "-"], "value = 1\n").status.success());
+    assert!(run_cli(&["parse", "--target-version=3.11", "-"], "value = f\"{name}\"\n")
+        .status
+        .success());
     assert!(run_cli(&["dump", "--no-attributes", "-"], "value = 1\n").status.success());
     assert!(run_cli(&["unparse", "-"], "value = 1\n").status.success());
     assert!(run_cli(&["tokenize", "--format=cpython", "-"], "value = 1\n").status.success());
+    let legacy_tokens = run_cli(
+        &["tokenize", "--target-version=3.11", "--format=cpython", "-"],
+        "value = f\"{name}\"\n",
+    );
+    assert!(legacy_tokens.status.success());
+    assert!(String::from_utf8_lossy(&legacy_tokens.stdout).contains("3 (1, 8) (1, 17)"));
     assert!(!run_cli(&["check", "-"], "value =\n").status.success());
     assert!(!run_cli(&["unknown", "-"], "").status.success());
 }

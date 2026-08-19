@@ -180,7 +180,10 @@ impl<'src> Scanner<'src> {
         }
         if let Some((kind, end)) = self.scan_prefixed_string() {
             if let TokenKind::String { prefix, triple } = kind {
-                if prefix.is_format() && self.options.mode == LexMode::Full {
+                if prefix.is_format()
+                    && self.options.mode == LexMode::Full
+                    && self.options.version.supports(PythonVersion::Py312)
+                {
                     self.emit_fstring(self.position, end, prefix, triple);
                 } else {
                     self.emit(kind, self.position, end);

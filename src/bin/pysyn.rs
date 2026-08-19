@@ -22,12 +22,15 @@ fn main() {
     }
     let mut cpython_format = false;
     let mut dump_attributes = true;
+    let mut version = pysyn::token::PythonVersion::default();
     let mut input = None;
     for argument in arguments {
         if argument == "--format=cpython" {
             cpython_format = true;
         } else if argument == "--no-attributes" {
             dump_attributes = false;
+        } else if let Some(value) = argument.strip_prefix("--target-version=") {
+            version = parse_target_version(value);
         } else if argument.starts_with('-') && argument != "-" {
             eprintln!("pysyn: unknown option: {argument}");
             print_usage_and_exit();
@@ -50,9 +53,12 @@ fn main() {
         "tokenize" => {
             let index = pysyn::LineIndex::new(source);
             if cpython_format {
-                print_cpython_tokens(source, &input_source.encoding, &index);
+                print_cpython_tokens(source, &input_source.encoding, &index, version);
             } else {
-                for item in pysyn::lexer::tokenize(source) {
+                for item in pysyn::lexer::tokenize_with(
+                    source,
+                    pysyn::lexer::LexOptions { mode: pysyn::lexer::LexMode::Full, version },
+                ) {
                     match item {
                         Ok(token) => println!("{:?} {}", token.kind, token.range),
                         Err(error) => eprintln!("{error}"),
@@ -60,7 +66,7 @@ fn main() {
                 }
             }
         }
-        "parse" | "dump" => match pysyn::parse_module(source) {
+        "parse" | "dump" => match parse_module(source, version) {
             Ok(module) => {
                 let options = pysyn::printer::DumpOptions::with_attributes(dump_attributes);
                 println!("{}", pysyn::printer::dump(&module, options));
@@ -70,14 +76,14 @@ fn main() {
                 std::process::exit(1);
             }
         },
-        "unparse" => match pysyn::parse_module(source) {
+        "unparse" => match parse_module(source, version) {
             Ok(module) => print!("{}", pysyn::printer::unparse(&module)),
             Err(error) => {
                 eprintln!("{}", error.diagnostic.display_with_source(&input_source.name, source));
                 std::process::exit(1);
             }
         },
-        "check" => match pysyn::parse_module(source) {
+        "check" => match parse_module(source, version) {
             Ok(module) => {
                 let diagnostics =
                     pysyn::validate::validate(&module, pysyn::validate::ValidateLevel::Semantic);
@@ -96,6 +102,43 @@ fn main() {
         },
         _ => unreachable!("command was validated before reading input"),
     }
+}
+
+fn parse_target_version(value: &str) -> pysyn::token::PythonVersion {
+    let version = match value {
+        "3.8" => pysyn::token::PythonVersion::Py38,
+        "3.9" => pysyn::token::PythonVersion::Py39,
+        "3.10" => pysyn::token::PythonVersion::Py310,
+        "3.11" => pysyn::token::PythonVersion::Py311,
+        "3.12" => pysyn::token::PythonVersion::Py312,
+        "3.13" => pysyn::token::PythonVersion::Py313,
+        _ => {
+            eprintln!("pysyn: unsupported target version: {value}");
+            print_usage_and_exit();
+        }
+    };
+    version
+}
+
+fn parse_module(
+    source: &str,
+    version: pysyn::token::PythonVersion,
+) -> Result<pysyn::ModModule, pysyn::ParseError> {
+    let parsed = pysyn::parse(
+        source,
+        pysyn::ParseOptions {
+            version,
+            mode: pysyn::parser::SourceMode::Module,
+            keep_comments: false,
+            ..pysyn::ParseOptions::default()
+        },
+    );
+    if let Some(diagnostic) =
+        parsed.errors.into_iter().find(|diagnostic| diagnostic.severity == pysyn::Severity::Error)
+    {
+        return Err(pysyn::ParseError { diagnostic });
+    }
+    Ok(parsed.module)
 }
 
 fn cpython_token_type(kind: pysyn::token::TokenKind) -> u16 {
@@ -171,13 +214,22 @@ fn read_source(input: Option<&str>) -> Result<InputSource, String> {
 }
 
 fn print_usage_and_exit() -> ! {
-    eprintln!("usage: pysyn [parse|tokenize|dump|unparse|check] [--no-attributes] [file|-]");
+    eprintln!("usage: pysyn [parse|tokenize|dump|unparse|check] [--target-version=3.8..3.13] [--no-attributes] [file|-]");
     std::process::exit(2);
 }
 
-fn print_cpython_tokens(source: &str, encoding: &str, index: &pysyn::LineIndex) {
+fn print_cpython_tokens(
+    source: &str,
+    encoding: &str,
+    index: &pysyn::LineIndex,
+    version: pysyn::token::PythonVersion,
+) {
     println!("65 (0, 0) (0, 0) {}", pysyn::printer::pyrepr(encoding));
-    let tokens = pysyn::lexer::tokenize(source).collect::<Vec<_>>();
+    let tokens = pysyn::lexer::tokenize_with(
+        source,
+        pysyn::lexer::LexOptions { mode: pysyn::lexer::LexMode::Full, version },
+    )
+    .collect::<Vec<_>>();
     let eof = source.len();
     let needs_final_newline = needs_final_newline(source, &tokens);
     let insertion_position = final_newline_position(&tokens);

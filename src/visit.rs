@@ -4,23 +4,23 @@
 //! type-erased event stream suitable for indexing every node kind.
 use crate::ast::*;
 
-/// Public API item.
+/// Receives read-only callbacks while traversing AST nodes.
 pub trait Visitor<'a> {
-    /// Visits or transforms the node.
+    /// Visits this node and then traverses its descendants.
     fn visit_stmt(&mut self, node: &'a Stmt) {
         walk_stmt(self, node);
     }
-    /// Visits or transforms the node.
+    /// Visits this node and then traverses its descendants.
     fn visit_expr(&mut self, node: &'a Expr) {
         walk_expr(self, node);
     }
-    /// Visits or transforms the node.
+    /// Visits this node and then traverses its descendants.
     fn visit_pattern(&mut self, node: &'a Pattern) {
         walk_pattern(self, node);
     }
 }
 
-/// Performs this public operation.
+/// Visits a statement and all of its owned descendants.
 pub fn walk_stmt<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, node: &'a Stmt) {
     match node {
         Stmt::Expr(stmt) => visitor.visit_expr(&stmt.value),
@@ -230,7 +230,7 @@ fn walk_type_params<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, type_params: &
     }
 }
 
-/// Performs this public operation.
+/// Visits a pattern and all of its owned descendants.
 pub fn walk_pattern<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, node: &'a Pattern) {
     match node {
         Pattern::Value(node) => visitor.visit_expr(&node.value),
@@ -271,7 +271,7 @@ pub fn walk_pattern<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, node: &'a Patt
     }
 }
 
-/// Performs this public operation.
+/// Visits an expression and all of its owned descendants.
 pub fn walk_expr<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, node: &'a Expr) {
     match node {
         Expr::BoolOp(node) => {
@@ -383,7 +383,7 @@ pub fn walk_expr<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, node: &'a Expr) {
     }
 }
 
-/// Performs this public operation.
+/// Returns a non-recursive preorder stream of AST node references.
 pub fn preorder(module: &ModModule) -> impl Iterator<Item = AnyNodeRef<'_>> {
     let mut nodes = Vec::new();
     for statement in &module.body {

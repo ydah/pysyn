@@ -73,14 +73,15 @@ def run(args: argparse.Namespace) -> int:
     if not cases:
         raise SystemExit("no Python cases selected")
 
+    target_version = f"{version[0]}.{version[1]}"
     findings: list[Finding] = []
     for case in cases:
         if args.mode in ("token", "all"):
-            findings.append(compare_tokens(case, args.python, pysyn, args.timeout, args.include_fstrings))
+            findings.append(compare_tokens(case, args.python, pysyn, args.timeout, args.include_fstrings, target_version))
         if args.mode in ("ast", "all"):
-            findings.append(compare_ast(case, args.python, pysyn, args.timeout, args.strict_ast))
+            findings.append(compare_ast(case, args.python, pysyn, args.timeout, args.strict_ast, target_version))
         if args.mode in ("roundtrip", "all"):
-            findings.append(compare_roundtrip(case, args.python, pysyn, args.timeout))
+            findings.append(compare_roundtrip(case, args.python, pysyn, args.timeout, target_version))
 
     counts = Counter(finding.status for finding in findings)
     print(f"CPython {version[0]}.{version[1]}: {len(cases)} cases, " + ", ".join(f"{key}={value}" for key, value in sorted(counts.items())))

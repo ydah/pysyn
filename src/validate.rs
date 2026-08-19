@@ -10,15 +10,15 @@ use crate::source::TextRange;
 use crate::visit::{walk_expr, Visitor};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-/// Public API item.
+/// Selects syntax-only or syntax-and-semantic validation.
 pub enum ValidateLevel {
-    /// AST variant.
+    /// AST variant for `Syntax` syntax.
     Syntax,
-    /// AST variant.
+    /// AST variant for `Semantic` syntax.
     Semantic,
 }
 
-/// Performs this public operation.
+/// Reports syntax or semantic validation diagnostics for a module.
 pub fn validate(module: &ModModule, level: ValidateLevel) -> Vec<Diagnostic> {
     let mut validator = Validator::new(level);
     let bindings = collect_block_bindings(&module.body);

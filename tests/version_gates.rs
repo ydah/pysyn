@@ -1,8 +1,9 @@
 #![allow(missing_docs)]
 
 use pysyn::error::{DiagnosticCode, Severity};
+use pysyn::lexer::{tokenize_with, LexMode, LexOptions};
 use pysyn::parser::{parse, ParseOptions, Parsed};
-use pysyn::token::PythonVersion;
+use pysyn::token::{PythonVersion, TokenKind};
 
 fn parse_at_version(source: &str, version: PythonVersion) -> Parsed {
     parse(source, ParseOptions { version, ..ParseOptions::default() })
@@ -63,4 +64,28 @@ fn pep701_fstring_forms_require_python_312() {
         assert_unsupported(source, PythonVersion::Py311);
         assert_supported_from_py312(source);
     }
+}
+
+#[test]
+fn legacy_f_strings_remain_single_tokens_before_python_312() {
+    let source = "value = f\"{name}\"\n";
+    for version in
+        [PythonVersion::Py38, PythonVersion::Py39, PythonVersion::Py310, PythonVersion::Py311]
+    {
+        let kinds = tokenize_with(source, LexOptions { mode: LexMode::Full, version })
+            .filter_map(Result::ok)
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
+        assert!(kinds
+            .iter()
+            .any(|kind| matches!(kind, TokenKind::String { prefix, .. } if prefix.is_format())));
+        assert!(!kinds.iter().any(|kind| matches!(kind, TokenKind::FStringStart { .. })));
+    }
+
+    let kinds =
+        tokenize_with(source, LexOptions { mode: LexMode::Full, version: PythonVersion::Py312 })
+            .filter_map(Result::ok)
+            .map(|token| token.kind)
+            .collect::<Vec<_>>();
+    assert!(kinds.iter().any(|kind| matches!(kind, TokenKind::FStringStart { .. })));
 }

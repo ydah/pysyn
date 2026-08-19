@@ -8,102 +8,102 @@ use std::borrow::Cow;
 use std::fmt;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-/// Public API item.
+/// Specifies whether an expression is being loaded, stored, or deleted.
 pub enum ExprContext {
-    /// AST variant.
+    /// AST variant for `Load` syntax.
     Load,
-    /// AST variant.
+    /// AST variant for `Store` syntax.
     Store,
-    /// AST variant.
+    /// AST variant for `Del` syntax.
     Del,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-/// Public API item.
+/// Represents a boolean conjunction or disjunction.
 pub enum BoolOperator {
-    /// AST variant.
+    /// AST variant for `And` syntax.
     And,
-    /// AST variant.
+    /// AST variant for `Or` syntax.
     Or,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-/// Public API item.
+/// Represents a unary Python operator.
 pub enum UnaryOperator {
-    /// AST variant.
+    /// AST variant for `Invert` syntax.
     Invert,
-    /// AST variant.
+    /// AST variant for `Not` syntax.
     Not,
-    /// AST variant.
+    /// AST variant for `UAdd` syntax.
     UAdd,
-    /// AST variant.
+    /// AST variant for `USub` syntax.
     USub,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-/// Public API item.
+/// Represents a binary Python operator.
 pub enum BinaryOperator {
-    /// AST variant.
+    /// AST variant for `Add` syntax.
     Add,
-    /// AST variant.
+    /// AST variant for `Sub` syntax.
     Sub,
-    /// AST variant.
+    /// AST variant for `Mult` syntax.
     Mult,
-    /// AST variant.
+    /// AST variant for `MatMult` syntax.
     MatMult,
-    /// AST variant.
+    /// AST variant for `Div` syntax.
     Div,
-    /// AST variant.
+    /// AST variant for `FloorDiv` syntax.
     FloorDiv,
-    /// AST variant.
+    /// AST variant for `Mod` syntax.
     Mod,
-    /// AST variant.
+    /// AST variant for `Pow` syntax.
     Pow,
-    /// AST variant.
+    /// AST variant for `LShift` syntax.
     LShift,
-    /// AST variant.
+    /// AST variant for `RShift` syntax.
     RShift,
-    /// AST variant.
+    /// AST variant for `BitOr` syntax.
     BitOr,
-    /// AST variant.
+    /// AST variant for `BitXor` syntax.
     BitXor,
-    /// AST variant.
+    /// AST variant for `BitAnd` syntax.
     BitAnd,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-/// Public API item.
+/// Represents a Python comparison operator.
 pub enum CompareOperator {
-    /// AST variant.
+    /// AST variant for `Eq` syntax.
     Eq,
-    /// AST variant.
+    /// AST variant for `NotEq` syntax.
     NotEq,
-    /// AST variant.
+    /// AST variant for `Lt` syntax.
     Lt,
-    /// AST variant.
+    /// AST variant for `LtE` syntax.
     LtE,
-    /// AST variant.
+    /// AST variant for `Gt` syntax.
     Gt,
-    /// AST variant.
+    /// AST variant for `GtE` syntax.
     GtE,
-    /// AST variant.
+    /// AST variant for `In` syntax.
     In,
-    /// AST variant.
+    /// AST variant for `NotIn` syntax.
     NotIn,
-    /// AST variant.
+    /// AST variant for `Is` syntax.
     Is,
-    /// AST variant.
+    /// AST variant for `IsNot` syntax.
     IsNot,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the numeric literal categories preserved by the AST.
 pub enum Number {
-    /// AST variant.
+    /// AST variant for `Int` syntax.
     Int(Int),
-    /// AST variant.
+    /// AST variant for `Float` syntax.
     Float(f64),
-    /// AST variant.
+    /// AST variant for `Complex` syntax.
     Complex {
         /// Real component.
         real: f64,
@@ -113,15 +113,15 @@ pub enum Number {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-/// Public API item.
+/// Preserves the source spelling of an integer literal.
 pub struct Int(String);
 
 impl Int {
-    /// Performs this public operation.
+    /// Creates a literal value from its source spelling.
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
-    /// Performs this public operation.
+    /// Returns the preserved source spelling of the integer literal.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -134,40 +134,40 @@ impl fmt::Display for Int {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-/// Public API item.
+/// Stores one or more adjacent Python string literal parts.
 pub struct StringLiteralValue {
-    /// Value stored by this public node.
+    /// Adjacent literal parts making up the string value.
     pub parts: Vec<StringLiteralPart>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-/// Public API item.
+/// Stores one source-level string literal and its decoded value.
 pub struct StringLiteralPart {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Lexical prefix, quote, and delimiter information.
     pub flags: StringFlags,
-    /// Value stored by this public node.
+    /// Expression value carried by this node.
     pub value: Box<str>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-/// Public API item.
+/// Stores the lexical flags of a string literal.
 pub struct StringFlags {
-    /// Value stored by this public node.
+    /// String prefix flags such as raw, bytes, or format.
     pub prefix: StringPrefix,
-    /// Value stored by this public node.
+    /// Whether the literal uses a triple-quoted delimiter.
     pub triple: bool,
-    /// Value stored by this public node.
+    /// Quote character used by the literal.
     pub quote: char,
 }
 
 impl StringLiteralValue {
-    /// Performs this public operation.
+    /// Creates a literal value from its source spelling.
     pub fn new(parts: Vec<StringLiteralPart>) -> Self {
         Self { parts }
     }
-    /// Performs this public operation.
+    /// Returns the concatenated decoded string value.
     pub fn to_str(&self) -> Cow<'_, str> {
         if self.parts.len() == 1 {
             return Cow::Borrowed(&self.parts[0].value);
@@ -177,904 +177,904 @@ impl StringLiteralValue {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents a parsed Python module.
 pub struct ModModule {
-    /// Value stored by this public node.
+    /// Statements contained by this construct.
     pub body: Vec<Stmt>,
-    /// Value stored by this public node.
+    /// Type-ignore directives recorded in this module.
     pub type_ignores: Vec<TypeIgnore>,
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
     pub(crate) source: Option<Box<str>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Stores a `# type: ignore` directive from the source.
 pub struct TypeIgnore {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// One-based source line recorded for this directive.
     pub lineno: u32,
-    /// Value stored by this public node.
+    /// Text following the `type: ignore` marker.
     pub tag: Box<str>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents a Python statement and its associated source range.
 pub enum Stmt {
-    /// AST variant.
+    /// AST variant for `FunctionDef` syntax.
     FunctionDef(Box<StmtFunctionDef>),
-    /// AST variant.
+    /// AST variant for `AsyncFunctionDef` syntax.
     AsyncFunctionDef(Box<StmtFunctionDef>),
-    /// AST variant.
+    /// AST variant for `ClassDef` syntax.
     ClassDef(Box<StmtClassDef>),
-    /// AST variant.
+    /// AST variant for `Return` syntax.
     Return(StmtReturn),
-    /// AST variant.
+    /// AST variant for `Delete` syntax.
     Delete(StmtDelete),
-    /// AST variant.
+    /// AST variant for `Assign` syntax.
     Assign(StmtAssign),
-    /// AST variant.
+    /// AST variant for `TypeAlias` syntax.
     TypeAlias(StmtTypeAlias),
-    /// AST variant.
+    /// AST variant for `AugAssign` syntax.
     AugAssign(StmtAugAssign),
-    /// AST variant.
+    /// AST variant for `AnnAssign` syntax.
     AnnAssign(StmtAnnAssign),
-    /// AST variant.
+    /// AST variant for `For` syntax.
     For(StmtFor),
-    /// AST variant.
+    /// AST variant for `AsyncFor` syntax.
     AsyncFor(StmtFor),
-    /// AST variant.
+    /// AST variant for `While` syntax.
     While(StmtWhile),
-    /// AST variant.
+    /// AST variant for `If` syntax.
     If(StmtIf),
-    /// AST variant.
+    /// AST variant for `With` syntax.
     With(StmtWith),
-    /// AST variant.
+    /// AST variant for `AsyncWith` syntax.
     AsyncWith(StmtWith),
-    /// AST variant.
+    /// AST variant for `Match` syntax.
     Match(StmtMatch),
-    /// AST variant.
+    /// AST variant for `Raise` syntax.
     Raise(StmtRaise),
-    /// AST variant.
+    /// AST variant for `Try` syntax.
     Try(Box<StmtTry>),
-    /// AST variant.
+    /// AST variant for `TryStar` syntax.
     TryStar(Box<StmtTry>),
-    /// AST variant.
+    /// AST variant for `Assert` syntax.
     Assert(StmtAssert),
-    /// AST variant.
+    /// AST variant for `Import` syntax.
     Import(StmtImport),
-    /// AST variant.
+    /// AST variant for `ImportFrom` syntax.
     ImportFrom(StmtImportFrom),
-    /// AST variant.
+    /// AST variant for `Global` syntax.
     Global(StmtNames),
-    /// AST variant.
+    /// AST variant for `Nonlocal` syntax.
     Nonlocal(StmtNames),
-    /// AST variant.
+    /// AST variant for `Expr` syntax.
     Expr(StmtExpr),
-    /// AST variant.
+    /// AST variant for `Pass` syntax.
     Pass(StmtSimple),
-    /// AST variant.
+    /// AST variant for `Break` syntax.
     Break(StmtSimple),
-    /// AST variant.
+    /// AST variant for `Continue` syntax.
     Continue(StmtSimple),
-    /// AST variant.
+    /// AST variant for `Invalid` syntax.
     Invalid(StmtInvalid),
 }
 
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `FunctionDef` statement node.
 pub struct StmtFunctionDef {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Identifier or binding name represented by this node.
     pub name: Box<str>,
-    /// Value stored by this public node.
+    /// Decorators applied to this definition.
     pub decorator_list: Vec<Expr>,
-    /// Value stored by this public node.
+    /// Type parameters declared by this construct.
     pub type_params: Vec<TypeParam>,
-    /// Value stored by this public node.
+    /// Positional and variadic parameters of this callable.
     pub args: Parameters,
-    /// Value stored by this public node.
+    /// Optional return annotation expression.
     pub returns: Option<Box<Expr>>,
-    /// Value stored by this public node.
+    /// Statements contained by this construct.
     pub body: Vec<Stmt>,
-    /// Value stored by this public node.
+    /// Optional PEP 484 type comment attached to this construct.
     pub type_comment: Option<Box<str>>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `ClassDef` statement node.
 pub struct StmtClassDef {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Identifier or binding name represented by this node.
     pub name: Box<str>,
-    /// Value stored by this public node.
+    /// Base-class expressions used by this class definition.
     pub bases: Vec<Expr>,
-    /// Value stored by this public node.
+    /// Keyword arguments associated with this construct.
     pub keywords: Vec<Keyword>,
-    /// Value stored by this public node.
+    /// Decorators applied to this definition.
     pub decorator_list: Vec<Expr>,
-    /// Value stored by this public node.
+    /// Type parameters declared by this construct.
     pub type_params: Vec<TypeParam>,
-    /// Value stored by this public node.
+    /// Statements contained by this construct.
     pub body: Vec<Stmt>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Return` statement node.
 pub struct StmtReturn {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Expression value carried by this node.
     pub value: Option<Box<Expr>>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Delete` statement node.
 pub struct StmtDelete {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Assignment or deletion targets, in source order.
     pub targets: Vec<Expr>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Assign` statement node.
 pub struct StmtAssign {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Assignment or deletion targets, in source order.
     pub targets: Vec<Expr>,
-    /// Value stored by this public node.
+    /// Expression value carried by this node.
     pub value: Box<Expr>,
-    /// Value stored by this public node.
+    /// Optional PEP 484 type comment attached to this construct.
     pub type_comment: Option<Box<str>>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `TypeAlias` statement node.
 pub struct StmtTypeAlias {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Identifier or binding name represented by this node.
     pub name: Box<Expr>,
-    /// Value stored by this public node.
+    /// Type parameters declared by this construct.
     pub type_params: Vec<TypeParam>,
-    /// Value stored by this public node.
+    /// Expression value carried by this node.
     pub value: Box<Expr>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `AugAssign` statement node.
 pub struct StmtAugAssign {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Expression receiving the assignment or iteration value.
     pub target: Box<Expr>,
-    /// Value stored by this public node.
+    /// Operator applied by this expression.
     pub op: BinaryOperator,
-    /// Value stored by this public node.
+    /// Expression value carried by this node.
     pub value: Box<Expr>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `AnnAssign` statement node.
 pub struct StmtAnnAssign {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Expression receiving the assignment or iteration value.
     pub target: Box<Expr>,
-    /// Value stored by this public node.
+    /// Optional or required type annotation expression.
     pub annotation: Box<Expr>,
-    /// Value stored by this public node.
+    /// Expression value carried by this node.
     pub value: Option<Box<Expr>>,
-    /// Value stored by this public node.
+    /// Whether the annotation target is a simple name.
     pub simple: bool,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `For` statement node.
 pub struct StmtFor {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Expression receiving the assignment or iteration value.
     pub target: Box<Expr>,
-    /// Value stored by this public node.
+    /// Iterable expression consumed by this loop or comprehension clause.
     pub iter: Box<Expr>,
-    /// Value stored by this public node.
+    /// Statements contained by this construct.
     pub body: Vec<Stmt>,
-    /// Value stored by this public node.
+    /// Statements in the construct's `else` branch.
     pub orelse: Vec<Stmt>,
-    /// Value stored by this public node.
+    /// Optional PEP 484 type comment attached to this construct.
     pub type_comment: Option<Box<str>>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `While` statement node.
 pub struct StmtWhile {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Condition expression evaluated by this construct.
     pub test: Box<Expr>,
-    /// Value stored by this public node.
+    /// Statements contained by this construct.
     pub body: Vec<Stmt>,
-    /// Value stored by this public node.
+    /// Statements in the construct's `else` branch.
     pub orelse: Vec<Stmt>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `If` statement node.
 pub struct StmtIf {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Condition expression evaluated by this construct.
     pub test: Box<Expr>,
-    /// Value stored by this public node.
+    /// Statements contained by this construct.
     pub body: Vec<Stmt>,
-    /// Value stored by this public node.
+    /// Statements in the construct's `else` branch.
     pub orelse: Vec<Stmt>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `With` statement node.
 pub struct StmtWith {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Context-manager items contained by this `with` statement.
     pub items: Vec<WithItem>,
-    /// Value stored by this public node.
+    /// Statements contained by this construct.
     pub body: Vec<Stmt>,
-    /// Value stored by this public node.
+    /// Optional PEP 484 type comment attached to this construct.
     pub type_comment: Option<Box<str>>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Match` statement node.
 pub struct StmtMatch {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Expression examined by this `match` statement.
     pub subject: Box<Expr>,
-    /// Value stored by this public node.
+    /// Pattern-matching cases contained by this `match` statement.
     pub cases: Vec<MatchCase>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Raise` statement node.
 pub struct StmtRaise {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Optional exception expression being raised.
     pub exc: Option<Box<Expr>>,
-    /// Value stored by this public node.
+    /// Optional explicit exception cause expression.
     pub cause: Option<Box<Expr>>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Try` statement node.
 pub struct StmtTry {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Statements contained by this construct.
     pub body: Vec<Stmt>,
-    /// Value stored by this public node.
+    /// Exception handlers contained by this `try` statement.
     pub handlers: Vec<ExceptHandler>,
-    /// Value stored by this public node.
+    /// Statements in the construct's `else` branch.
     pub orelse: Vec<Stmt>,
-    /// Value stored by this public node.
+    /// Statements in the `finally` branch.
     pub finalbody: Vec<Stmt>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Assert` statement node.
 pub struct StmtAssert {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Condition expression evaluated by this construct.
     pub test: Box<Expr>,
-    /// Value stored by this public node.
+    /// Optional assertion message expression.
     pub msg: Option<Box<Expr>>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Import` statement node.
 pub struct StmtImport {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Names declared or imported by this construct.
     pub names: Vec<Alias>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `ImportFrom` statement node.
 pub struct StmtImportFrom {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Optional module path used by a relative import.
     pub module: Option<Box<str>>,
-    /// Value stored by this public node.
+    /// Names declared or imported by this construct.
     pub names: Vec<Alias>,
-    /// Value stored by this public node.
+    /// Number of leading dots in a relative import.
     pub level: u32,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Names` statement node.
 pub struct StmtNames {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Names declared or imported by this construct.
     pub names: Vec<Box<str>>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Expr` statement node.
 pub struct StmtExpr {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Expression value carried by this node.
     pub value: Box<Expr>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Simple` statement node.
 pub struct StmtSimple {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Invalid` statement node.
 pub struct StmtInvalid {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Parser-provided description of the invalid construct.
     pub message: Box<str>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents a Python expression and its associated source range.
 pub enum Expr {
-    /// AST variant.
+    /// AST variant for `BoolOp` syntax.
     BoolOp(ExprBoolOp),
-    /// AST variant.
+    /// AST variant for `NamedExpr` syntax.
     NamedExpr(ExprNamedExpr),
-    /// AST variant.
+    /// AST variant for `BinOp` syntax.
     BinOp(ExprBinOp),
-    /// AST variant.
+    /// AST variant for `UnaryOp` syntax.
     UnaryOp(ExprUnaryOp),
-    /// AST variant.
+    /// AST variant for `Lambda` syntax.
     Lambda(Box<ExprLambda>),
-    /// AST variant.
+    /// AST variant for `IfExp` syntax.
     IfExp(ExprIfExp),
-    /// AST variant.
+    /// AST variant for `Dict` syntax.
     Dict(ExprDict),
-    /// AST variant.
+    /// AST variant for `Set` syntax.
     Set(ExprSet),
-    /// AST variant.
+    /// AST variant for `ListComp` syntax.
     ListComp(ExprComprehension),
-    /// AST variant.
+    /// AST variant for `SetComp` syntax.
     SetComp(ExprComprehension),
-    /// AST variant.
+    /// AST variant for `DictComp` syntax.
     DictComp(ExprComprehension),
-    /// AST variant.
+    /// AST variant for `GeneratorExp` syntax.
     GeneratorExp(ExprComprehension),
-    /// AST variant.
+    /// AST variant for `Await` syntax.
     Await(ExprUnaryValue),
-    /// AST variant.
+    /// AST variant for `Yield` syntax.
     Yield(ExprUnaryValue),
-    /// AST variant.
+    /// AST variant for `YieldFrom` syntax.
     YieldFrom(ExprUnaryValue),
-    /// AST variant.
+    /// AST variant for `Compare` syntax.
     Compare(Box<ExprCompare>),
-    /// AST variant.
+    /// AST variant for `Call` syntax.
     Call(Box<ExprCall>),
-    /// AST variant.
+    /// AST variant for `FString` syntax.
     FString(ExprFString),
-    /// AST variant.
+    /// AST variant for `FormattedValue` syntax.
     FormattedValue(ExprFormattedValue),
-    /// AST variant.
+    /// AST variant for `StringLiteral` syntax.
     StringLiteral(ExprString),
-    /// AST variant.
+    /// AST variant for `BytesLiteral` syntax.
     BytesLiteral(ExprString),
-    /// AST variant.
+    /// AST variant for `NumberLiteral` syntax.
     NumberLiteral(ExprNumber),
-    /// AST variant.
+    /// AST variant for `BooleanLiteral` syntax.
     BooleanLiteral(ExprBoolean),
-    /// AST variant.
+    /// AST variant for `NoneLiteral` syntax.
     NoneLiteral(ExprLiteral),
-    /// AST variant.
+    /// AST variant for `EllipsisLiteral` syntax.
     EllipsisLiteral(ExprLiteral),
-    /// AST variant.
+    /// AST variant for `Attribute` syntax.
     Attribute(ExprAttribute),
-    /// AST variant.
+    /// AST variant for `Subscript` syntax.
     Subscript(ExprSubscript),
-    /// AST variant.
+    /// AST variant for `Starred` syntax.
     Starred(ExprStarred),
-    /// AST variant.
+    /// AST variant for `Name` syntax.
     Name(ExprName),
-    /// AST variant.
+    /// AST variant for `List` syntax.
     List(ExprSequence),
-    /// AST variant.
+    /// AST variant for `Tuple` syntax.
     Tuple(ExprSequence),
-    /// AST variant.
+    /// AST variant for `Slice` syntax.
     Slice(ExprSlice),
-    /// AST variant.
+    /// AST variant for `Invalid` syntax.
     Invalid(ExprInvalid),
 }
 
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `BoolOp` expression node.
 pub struct ExprBoolOp {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Operator applied by this expression.
     pub op: BoolOperator,
-    /// Value stored by this public node.
+    /// Values produced or combined by this expression.
     pub values: Vec<Expr>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `NamedExpr` expression node.
 pub struct ExprNamedExpr {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Expression receiving the assignment or iteration value.
     pub target: Box<Expr>,
-    /// Value stored by this public node.
+    /// Expression value carried by this node.
     pub value: Box<Expr>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `BinOp` expression node.
 pub struct ExprBinOp {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Left-hand operand of this binary expression.
     pub left: Box<Expr>,
-    /// Value stored by this public node.
+    /// Operator applied by this expression.
     pub op: BinaryOperator,
-    /// Value stored by this public node.
+    /// Right-hand operand of this binary expression.
     pub right: Box<Expr>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `UnaryOp` expression node.
 pub struct ExprUnaryOp {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Operator applied by this expression.
     pub op: UnaryOperator,
-    /// Value stored by this public node.
+    /// Operand of this unary expression.
     pub operand: Box<Expr>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Lambda` expression node.
 pub struct ExprLambda {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Positional and variadic parameters of this callable.
     pub args: Parameters,
-    /// Value stored by this public node.
+    /// Statements contained by this construct.
     pub body: Box<Expr>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `IfExp` expression node.
 pub struct ExprIfExp {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Statements contained by this construct.
     pub body: Box<Expr>,
-    /// Value stored by this public node.
+    /// Condition expression evaluated by this construct.
     pub test: Box<Expr>,
-    /// Value stored by this public node.
+    /// Statements in the construct's `else` branch.
     pub orelse: Box<Expr>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Dict` expression node.
 pub struct ExprDict {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Key expressions associated with this mapping or dictionary.
     pub keys: Vec<Option<Expr>>,
-    /// Value stored by this public node.
+    /// Values produced or combined by this expression.
     pub values: Vec<Expr>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Set` expression node.
 pub struct ExprSet {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Elements contained by this list, tuple, or set expression.
     pub elts: Vec<Expr>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Comprehension` expression node.
 pub struct ExprComprehension {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Element expression produced by this comprehension.
     pub elt: Box<Expr>,
-    /// Value stored by this public node.
+    /// Generator clauses used by this comprehension.
     pub generators: Vec<Comprehension>,
-    /// Value stored by this public node.
+    /// Key expression produced by this dictionary comprehension.
     pub key: Option<Box<Expr>>,
-    /// Value stored by this public node.
+    /// Expression value carried by this node.
     pub value: Option<Box<Expr>>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `UnaryValue` expression node.
 pub struct ExprUnaryValue {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Expression value carried by this node.
     pub value: Option<Box<Expr>>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Compare` expression node.
 pub struct ExprCompare {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Left-hand operand of this binary expression.
     pub left: Box<Expr>,
-    /// Value stored by this public node.
+    /// Comparison operators applied between the operands.
     pub ops: Vec<CompareOperator>,
-    /// Value stored by this public node.
+    /// Expressions compared with the left-hand operand.
     pub comparators: Vec<Expr>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Call` expression node.
 pub struct ExprCall {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Callable expression invoked by this call.
     pub func: Box<Expr>,
-    /// Value stored by this public node.
+    /// Positional and variadic parameters of this callable.
     pub args: Vec<Expr>,
-    /// Value stored by this public node.
+    /// Keyword arguments associated with this construct.
     pub keywords: Vec<Keyword>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `FString` expression node.
 pub struct ExprFString {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Values produced or combined by this expression.
     pub values: Vec<Expr>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `FormattedValue` expression node.
 pub struct ExprFormattedValue {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Expression value carried by this node.
     pub value: Box<Expr>,
-    /// Value stored by this public node.
+    /// Optional f-string conversion character.
     pub conversion: Option<char>,
-    /// Value stored by this public node.
+    /// Optional f-string format-specification expression.
     pub format_spec: Option<Box<Expr>>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `String` expression node.
 pub struct ExprString {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Expression value carried by this node.
     pub value: StringLiteralValue,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Number` expression node.
 pub struct ExprNumber {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Expression value carried by this node.
     pub value: Number,
-    /// Value stored by this public node.
+    /// Original source spelling of this numeric literal.
     pub raw: Box<str>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Boolean` expression node.
 pub struct ExprBoolean {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Expression value carried by this node.
     pub value: bool,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Literal` expression node.
 pub struct ExprLiteral {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Attribute` expression node.
 pub struct ExprAttribute {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Expression value carried by this node.
     pub value: Box<Expr>,
-    /// Value stored by this public node.
+    /// Attribute name selected by this attribute expression.
     pub attr: Box<str>,
-    /// Value stored by this public node.
+    /// Expression context indicating load, store, or delete.
     pub ctx: ExprContext,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Subscript` expression node.
 pub struct ExprSubscript {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Expression value carried by this node.
     pub value: Box<Expr>,
-    /// Value stored by this public node.
+    /// Subscript or slice expression applied to the value.
     pub slice: Box<Expr>,
-    /// Value stored by this public node.
+    /// Expression context indicating load, store, or delete.
     pub ctx: ExprContext,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Starred` expression node.
 pub struct ExprStarred {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Expression value carried by this node.
     pub value: Box<Expr>,
-    /// Value stored by this public node.
+    /// Expression context indicating load, store, or delete.
     pub ctx: ExprContext,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Name` expression node.
 pub struct ExprName {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Identifier text represented by this name expression.
     pub id: Box<str>,
-    /// Value stored by this public node.
+    /// Expression context indicating load, store, or delete.
     pub ctx: ExprContext,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Sequence` expression node.
 pub struct ExprSequence {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Elements contained by this list, tuple, or set expression.
     pub elts: Vec<Expr>,
-    /// Value stored by this public node.
+    /// Expression context indicating load, store, or delete.
     pub ctx: ExprContext,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Slice` expression node.
 pub struct ExprSlice {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Optional lower bound of this slice.
     pub lower: Option<Box<Expr>>,
-    /// Value stored by this public node.
+    /// Optional upper bound of this slice.
     pub upper: Option<Box<Expr>>,
-    /// Value stored by this public node.
+    /// Optional step expression of this slice.
     pub step: Option<Box<Expr>>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the Python `Invalid` expression node.
 pub struct ExprInvalid {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Parser-provided description of the invalid construct.
     pub message: Box<str>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Stores the positional, variadic, keyword-only, and default parameters of a callable.
 pub struct Parameters {
-    /// Value stored by this public node.
+    /// Positional-only parameters, in declaration order.
     pub posonlyargs: Vec<Parameter>,
-    /// Value stored by this public node.
+    /// Positional and variadic parameters of this callable.
     pub args: Vec<Parameter>,
-    /// Value stored by this public node.
+    /// Optional variadic positional parameter.
     pub vararg: Option<Parameter>,
-    /// Value stored by this public node.
+    /// Keyword-only parameters, in declaration order.
     pub kwonlyargs: Vec<Parameter>,
-    /// Value stored by this public node.
+    /// Defaults corresponding to the keyword-only parameters.
     pub kw_defaults: Vec<Option<Expr>>,
-    /// Value stored by this public node.
+    /// Optional variadic keyword parameter.
     pub kwarg: Option<Parameter>,
-    /// Value stored by this public node.
+    /// Defaults corresponding to the trailing positional parameters.
     pub defaults: Vec<Expr>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Stores one callable parameter and its optional annotation.
 pub struct Parameter {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Identifier or binding name represented by this node.
     pub name: Box<str>,
-    /// Value stored by this public node.
+    /// Optional or required type annotation expression.
     pub annotation: Option<Box<Expr>>,
-    /// Value stored by this public node.
+    /// Optional PEP 484 type comment attached to this construct.
     pub type_comment: Option<Box<str>>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Stores one keyword argument in a call or class definition.
 pub struct Keyword {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Optional keyword name; `None` denotes a positional argument.
     pub arg: Option<Box<str>>,
-    /// Value stored by this public node.
+    /// Expression value carried by this node.
     pub value: Expr,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Stores one import name and its optional alias.
 pub struct Alias {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Identifier or binding name represented by this node.
     pub name: Box<str>,
-    /// Value stored by this public node.
+    /// Optional import alias.
     pub asname: Option<Box<str>>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Stores one context-manager item in a `with` statement.
 pub struct WithItem {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Context-manager expression evaluated by this item.
     pub context_expr: Expr,
-    /// Value stored by this public node.
+    /// Optional target receiving the context-manager value.
     pub optional_vars: Option<Expr>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Stores one `except` or `except*` handler.
 pub struct ExceptHandler {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Optional exception type expression.
     pub typ: Option<Expr>,
-    /// Value stored by this public node.
+    /// Identifier or binding name represented by this node.
     pub name: Option<Box<str>>,
-    /// Value stored by this public node.
+    /// Statements contained by this construct.
     pub body: Vec<Stmt>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Stores one generator clause in a comprehension.
 pub struct Comprehension {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Expression receiving the assignment or iteration value.
     pub target: Expr,
-    /// Value stored by this public node.
+    /// Iterable expression consumed by this loop or comprehension clause.
     pub iter: Expr,
-    /// Value stored by this public node.
+    /// Conditions that filter this comprehension clause.
     pub ifs: Vec<Expr>,
-    /// Value stored by this public node.
+    /// Whether this comprehension clause uses `async for`.
     pub is_async: bool,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Stores one `case` arm in a `match` statement.
 pub struct MatchCase {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Pattern matched by this case or pattern node.
     pub pattern: Pattern,
-    /// Value stored by this public node.
+    /// Optional condition guarding this match case.
     pub guard: Option<Expr>,
-    /// Value stored by this public node.
+    /// Statements contained by this construct.
     pub body: Vec<Stmt>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents a structural-pattern matching node.
 pub enum Pattern {
-    /// AST variant.
+    /// AST variant for `Value` syntax.
     Value(PatternValue),
-    /// AST variant.
+    /// AST variant for `Singleton` syntax.
     Singleton(PatternSingleton),
-    /// AST variant.
+    /// AST variant for `Sequence` syntax.
     Sequence(PatternSequence),
-    /// AST variant.
+    /// AST variant for `Mapping` syntax.
     Mapping(PatternMapping),
-    /// AST variant.
+    /// AST variant for `Class` syntax.
     Class(PatternClass),
-    /// AST variant.
+    /// AST variant for `Star` syntax.
     Star(PatternStar),
-    /// AST variant.
+    /// AST variant for `As` syntax.
     As(PatternAs),
-    /// AST variant.
+    /// AST variant for `Or` syntax.
     Or(PatternOr),
-    /// AST variant.
+    /// AST variant for `Invalid` syntax.
     Invalid(PatternInvalid),
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the `Value` structural pattern node.
 pub struct PatternValue {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Expression value carried by this node.
     pub value: Expr,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the `Singleton` structural pattern node.
 pub struct PatternSingleton {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Expression value carried by this node.
     pub value: Expr,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the `Sequence` structural pattern node.
 pub struct PatternSequence {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Nested patterns contained by this pattern node.
     pub patterns: Vec<Pattern>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the `Mapping` structural pattern node.
 pub struct PatternMapping {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Key expressions associated with this mapping or dictionary.
     pub keys: Vec<Expr>,
-    /// Value stored by this public node.
+    /// Nested patterns contained by this pattern node.
     pub patterns: Vec<Pattern>,
-    /// Value stored by this public node.
+    /// Optional name capturing unmatched mapping keys.
     pub rest: Option<Box<str>>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the `Class` structural pattern node.
 pub struct PatternClass {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Class expression used by this class pattern.
     pub cls: Expr,
-    /// Value stored by this public node.
+    /// Nested patterns contained by this pattern node.
     pub patterns: Vec<Pattern>,
-    /// Value stored by this public node.
+    /// Keyword attribute names used by this class pattern.
     pub kwd_attrs: Vec<Box<str>>,
-    /// Value stored by this public node.
+    /// Patterns matched against the keyword attributes.
     pub kwd_patterns: Vec<Pattern>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the `Star` structural pattern node.
 pub struct PatternStar {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Identifier or binding name represented by this node.
     pub name: Option<Box<str>>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the `As` structural pattern node.
 pub struct PatternAs {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Pattern matched by this case or pattern node.
     pub pattern: Option<Box<Pattern>>,
-    /// Value stored by this public node.
+    /// Identifier or binding name represented by this node.
     pub name: Option<Box<str>>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the `Or` structural pattern node.
 pub struct PatternOr {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Nested patterns contained by this pattern node.
     pub patterns: Vec<Pattern>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents the `Invalid` structural pattern node.
 pub struct PatternInvalid {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Represents a Python 3.12+ type parameter declaration.
 pub enum TypeParam {
-    /// AST variant.
+    /// AST variant for `TypeVar` syntax.
     TypeVar(TypeParamData),
-    /// AST variant.
+    /// AST variant for `ParamSpec` syntax.
     ParamSpec(TypeParamData),
-    /// AST variant.
+    /// AST variant for `TypeVarTuple` syntax.
     TypeVarTuple(TypeParamData),
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Stores the name, bound, and default of a type parameter.
 pub struct TypeParamData {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Identifier or binding name represented by this node.
     pub name: Box<str>,
-    /// Value stored by this public node.
+    /// Optional type-variable bound expression.
     pub bound: Option<Expr>,
-    /// Value stored by this public node.
+    /// Optional type-parameter default expression.
     pub default: Option<Expr>,
 }
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Stores a source comment retained by the parser.
 pub struct Comment {
-    /// Value stored by this public node.
+    /// Source range occupied by this node.
     pub range: TextRange,
-    /// Value stored by this public node.
+    /// Comment text without its leading marker.
     pub text: Box<str>,
 }
 
 /// Returns the source range of an AST node.
 pub trait Ranged {
-    /// Visits or transforms the node.
+    /// Visits this node and then traverses its descendants.
     fn range(&self) -> TextRange;
 }
 
@@ -1238,13 +1238,13 @@ impl Ranged for TypeParam {
 
 /// A type-erased AST node reference useful for generic traversals.
 #[derive(Copy, Clone, Debug)]
-/// Public API item.
+/// References one of the AST categories exposed to generic traversals.
 pub enum AnyNodeRef<'a> {
-    /// AST variant.
+    /// AST variant for `Stmt` syntax.
     Stmt(&'a Stmt),
-    /// AST variant.
+    /// AST variant for `Expr` syntax.
     Expr(&'a Expr),
-    /// AST variant.
+    /// AST variant for `Pattern` syntax.
     Pattern(&'a Pattern),
 }
 

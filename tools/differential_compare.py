@@ -22,7 +22,7 @@ class Finding:
     detail: str = ""
 
 
-def compare_tokens(case: Case, command: str, pysyn: str, timeout: float, include_fstrings: bool) -> Finding:
+def compare_tokens(case: Case, command: str, pysyn: str, timeout: float, include_fstrings: bool, target_version: str) -> Finding:
     """Compare exact token type, span, and source text."""
 
     if has_fstring(case.source) and not include_fstrings:
@@ -30,7 +30,7 @@ def compare_tokens(case: Case, command: str, pysyn: str, timeout: float, include
     reference_ok, expected = reference_tokens(command, case.source, timeout)
     if not reference_ok:
         return Finding(case.name, "token", "reference-error")
-    status, actual = actual_tokens(pysyn, case.source, timeout, case.path)
+    status, actual = actual_tokens(pysyn, case.source, timeout, case.path, target_version)
     if status != "ok":
         return Finding(case.name, "token", "pysyn-error", status)
     if expected == actual:
@@ -38,7 +38,7 @@ def compare_tokens(case: Case, command: str, pysyn: str, timeout: float, include
     return Finding(case.name, "token", "mismatch", first_difference(expected, actual))
 
 
-def compare_ast(case: Case, command: str, pysyn: str, timeout: float, strict: bool) -> Finding:
+def compare_ast(case: Case, command: str, pysyn: str, timeout: float, strict: bool, target_version: str) -> Finding:
     """Compare a CPython AST dump with the Rust printer output."""
 
     reference_ok, expected = cpython_ast(command, case.source, timeout, include_attributes=strict)
@@ -46,7 +46,7 @@ def compare_ast(case: Case, command: str, pysyn: str, timeout: float, strict: bo
         return Finding(case.name, "ast", "reference-syntax", json.dumps(expected, ensure_ascii=False))
     argument = str(case.path) if case.path is not None else "-"
     stdin = "" if case.path is not None else case.source
-    dump_command = [pysyn, "dump"]
+    dump_command = [pysyn, "dump", f"--target-version={target_version}"]
     if not strict:
         dump_command.append("--no-attributes")
     dump_command.append(argument)
@@ -62,7 +62,7 @@ def compare_ast(case: Case, command: str, pysyn: str, timeout: float, strict: bo
     return Finding(case.name, "ast", "mismatch", "normalized CPython AST differs")
 
 
-def compare_roundtrip(case: Case, command: str, pysyn: str, timeout: float) -> Finding:
+def compare_roundtrip(case: Case, command: str, pysyn: str, timeout: float, target_version: str) -> Finding:
     """Check that pysyn's unparse preserves CPython's structural AST."""
 
     reference_ok, expected = cpython_ast(command, case.source, timeout)
@@ -70,13 +70,13 @@ def compare_roundtrip(case: Case, command: str, pysyn: str, timeout: float) -> F
         return Finding(case.name, "roundtrip", "reference-syntax")
     argument = str(case.path) if case.path is not None else "-"
     stdin = "" if case.path is not None else case.source
-    output, stderr, status = run_process([pysyn, "unparse", argument], stdin, timeout)
+    output, stderr, status = run_process([pysyn, "unparse", f"--target-version={target_version}", argument], stdin, timeout)
     if status != 0:
         return Finding(case.name, "roundtrip", "pysyn-error", str(status))
     reparsed_ok, reparsed = cpython_ast(command, output, timeout)
     if not reparsed_ok:
         return Finding(case.name, "roundtrip", "unparse-invalid", json.dumps(reparsed, ensure_ascii=False))
-    check_output, check_error, check_status = run_process([pysyn, "check", "-"], output, timeout)
+    check_output, check_error, check_status = run_process([pysyn, "check", f"--target-version={target_version}", "-"], output, timeout)
     if check_status != 0:
         return Finding(case.name, "roundtrip", "unparse-rejected-by-pysyn", str(check_status))
     if dumps_equal(expected, reparsed):

@@ -34,6 +34,8 @@ and always passes `--include-fstrings` for each CPython 3.10–3.13 matrix entry
 It also passes `--strict-ast`, so location attributes are checked in CI.
 This keeps the CI binary aligned with the feature-complete test build and
 prevents f-string token or AST-location coverage from being silently skipped.
+The harness passes the matching `--target-version` to every CLI invocation;
+without that option a CLI invocation intentionally defaults to Python 3.13.
 
 Compare a local corpus without copying it into the repository:
 

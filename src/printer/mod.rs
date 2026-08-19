@@ -6,11 +6,11 @@ use crate::ast::*;
 use crate::source::{LineIndex, TextRange};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-/// Public API item.
+/// Configures AST dump location attributes and indentation.
 pub struct DumpOptions {
-    /// Value stored by this public node.
+    /// Whether source location attributes are included in dumps.
     pub include_attributes: bool,
-    /// Value stored by this public node.
+    /// Optional indentation width for multi-line dumps.
     pub indent: Option<usize>,
     source: Option<Box<str>>,
     line_index: Option<LineIndex>,
@@ -23,19 +23,19 @@ impl Default for DumpOptions {
 }
 
 impl DumpOptions {
-    /// Performs this public operation.
+    /// Creates dump options with location attributes enabled or disabled.
     pub fn with_attributes(include_attributes: bool) -> Self {
         Self { include_attributes, ..Self::default() }
     }
 
-    /// Performs this public operation.
+    /// Returns dump options with the requested indentation width.
     pub fn with_indent(mut self, indent: Option<usize>) -> Self {
         self.indent = indent;
         self
     }
 }
 
-/// Performs this public operation.
+/// Serializes a parsed module using a CPython-shaped AST representation.
 pub fn dump(module: &ModModule, options: DumpOptions) -> String {
     let mut options = options;
     if options.include_attributes && options.source.is_none() {
@@ -47,7 +47,7 @@ pub fn dump(module: &ModModule, options: DumpOptions) -> String {
     format_dump(output, options.indent)
 }
 
-/// Performs this public operation.
+/// Serializes a module while using the supplied source for locations.
 pub fn dump_with_source(module: &ModModule, source: &str, options: DumpOptions) -> String {
     let mut options = options;
     options.source = Some(source.into());
@@ -135,7 +135,7 @@ fn format_dump(value: String, indent: Option<usize>) -> String {
     output
 }
 
-/// Performs this public operation.
+/// Generates valid Python source from a parsed module.
 pub fn unparse(module: &ModModule) -> String {
     let mut printer = Unparser { output: String::new(), indent: 0 };
     for statement in &module.body {
@@ -144,7 +144,7 @@ pub fn unparse(module: &ModModule) -> String {
     printer.output
 }
 
-/// Performs this public operation.
+/// Formats a string using Python-style quoting and escaping.
 pub fn pyrepr(value: &str) -> String {
     repr_string(value)
 }
@@ -1864,7 +1864,10 @@ impl Unparser {
                     .map(|value| format!(":{}", self.expression(value)))
                     .unwrap_or_default()
             ),
-            Expr::FString(node) => format!("f\"{}\"", self.fstring_text(&node.values)),
+            Expr::FString(node) => {
+                let quote = self.fstring_quote(&node.values);
+                format!("f{quote}{}{quote}", self.fstring_text(&node.values, quote))
+            }
             Expr::FormattedValue(node) => {
                 let conversion =
                     node.conversion.map(|value| format!("!{value}")).unwrap_or_default();
@@ -1987,23 +1990,35 @@ impl Unparser {
         }
     }
 
-    fn fstring_text(&self, values: &[Expr]) -> String {
+    fn fstring_quote(&self, values: &[Expr]) -> char {
+        ['\'', '"']
+            .into_iter()
+            .find(|quote| {
+                let body = self.fstring_text(values, *quote);
+                fstring_quote_is_safe(&body, *quote)
+            })
+            .unwrap_or('"')
+    }
+
+    fn fstring_text(&self, values: &[Expr], quote: char) -> String {
         values
             .iter()
             .map(|value| match value {
-                Expr::StringLiteral(node) => fstring_literal(&node.value.to_str()),
+                Expr::StringLiteral(node) => fstring_literal(&node.value.to_str(), quote),
                 Expr::FormattedValue(node) => {
                     let conversion =
                         node.conversion.map_or(String::new(), |value| format!("!{value}"));
                     let spec = node.format_spec.as_ref().map_or(String::new(), |value| match value
                         .as_ref()
                     {
-                        Expr::FString(node) => format!(":{}", self.fstring_text(&node.values)),
+                        Expr::FString(node) => {
+                            format!(":{}", self.fstring_text(&node.values, quote))
+                        }
                         other => format!(":{}", self.expression(other)),
                     });
                     format!("{{{}{conversion}{spec}}}", self.expression(&node.value))
                 }
-                _ => fstring_literal(&self.expression(value)),
+                _ => fstring_literal(&self.expression(value), quote),
             })
             .collect()
     }
@@ -2024,14 +2039,17 @@ impl Unparser {
     }
 }
 
-fn fstring_literal(value: &str) -> String {
+fn fstring_literal(value: &str, quote: char) -> String {
     let mut output = String::with_capacity(value.len());
     for character in value.chars() {
         match character {
             '{' => output.push_str("{{"),
             '}' => output.push_str("}}"),
             '\\' => output.push_str("\\\\"),
-            '"' => output.push_str("\\\""),
+            character if character == quote => {
+                output.push('\\');
+                output.push(character);
+            }
             '\n' => output.push_str("\\n"),
             '\r' => output.push_str("\\r"),
             '\t' => output.push_str("\\t"),
@@ -2049,6 +2067,22 @@ fn fstring_literal(value: &str) -> String {
         }
     }
     output
+}
+
+fn fstring_quote_is_safe(body: &str, quote: char) -> bool {
+    let bytes = body.as_bytes();
+    let mut depth = 0usize;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' if bytes.get(index + 1) != Some(&b'{') => depth += 1,
+            b'}' if bytes.get(index + 1) != Some(&b'}') => depth = depth.saturating_sub(1),
+            byte if depth > 0 && byte == quote as u8 => return false,
+            _ => {}
+        }
+        index += 1;
+    }
+    true
 }
 
 fn alias_text(alias: &Alias) -> String {

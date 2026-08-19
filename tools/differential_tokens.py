@@ -71,14 +71,14 @@ def reference_tokens(command: str, source: str, timeout: float) -> tuple[bool, l
 
 
 def actual_tokens(
-    command: str, source: str, timeout: float, path: Path | None = None
+    command: str, source: str, timeout: float, path: Path | None = None, target_version: str = "3.13"
 ) -> tuple[str, list[tuple]]:
     """Parse the CLI's CPython-format token lines."""
 
     argument = str(path) if path is not None else "-"
     stdin = "" if path is not None else source
     stdout, stderr, status = run_process(
-        [command, "tokenize", "--format=cpython", argument], stdin, timeout
+        [command, "tokenize", f"--target-version={target_version}", "--format=cpython", argument], stdin, timeout
     )
     if status != 0:
         return str(status), []

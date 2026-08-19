@@ -13,37 +13,37 @@ use unicode_normalization::UnicodeNormalization;
 
 /// Parsing mode for complete source text.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-/// Public API item.
+/// Selects the grammar entry point used to parse source text.
 pub enum SourceMode {
-    /// AST variant.
+    /// AST variant for `Module` syntax.
     Module,
-    /// AST variant.
+    /// AST variant for `Expression` syntax.
     Expression,
-    /// AST variant.
+    /// AST variant for `Interactive` syntax.
     Interactive,
 }
 
 /// Controls strictness and parser resource limits.
 #[derive(Clone, Debug, PartialEq, Eq)]
-/// Public API item.
+/// Configures parser versioning, recovery, resource limits, and retained source data.
 pub struct ParseOptions {
-    /// Value stored by this public node.
+    /// Python grammar version used for feature gates.
     pub version: PythonVersion,
-    /// Value stored by this public node.
+    /// Grammar entry point used for this parse.
     pub mode: SourceMode,
-    /// Value stored by this public node.
+    /// Strict or recovery behavior selected for parsing.
     pub parse_mode: ParseMode,
-    /// Value stored by this public node.
+    /// Whether source comments are retained in the parse result.
     pub keep_comments: bool,
-    /// Value stored by this public node.
+    /// Whether PEP 484 type comments are retained.
     pub type_comments: bool,
-    /// Value stored by this public node.
+    /// Maximum recursive parser depth permitted for one input.
     pub max_depth: u32,
     /// Maximum number of expression parser invocations allowed for one input.
     pub max_nodes: usize,
-    /// Value stored by this public node.
+    /// Maximum diagnostics retained during recovery.
     pub max_errors: usize,
-    /// Value stored by this public node.
+    /// Whether the lexer token stream is retained in the parse result.
     pub keep_tokens: bool,
 }
 
@@ -65,25 +65,25 @@ impl Default for ParseOptions {
 
 /// Controls whether syntax errors stop parsing.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-/// Public API item.
+/// Selects strict parsing or bounded error recovery.
 pub enum ParseMode {
-    /// AST variant.
+    /// AST variant for `Strict` syntax.
     Strict,
-    /// AST variant.
+    /// AST variant for `Recover` syntax.
     Recover,
 }
 
 /// A recovered parse result.
 #[derive(Clone, Debug, PartialEq)]
-/// Public API item.
+/// Contains a recovered module together with optional comments, tokens, and diagnostics.
 pub struct Parsed {
-    /// Value stored by this public node.
+    /// Optional module path used by a relative import.
     pub module: ModModule,
-    /// Value stored by this public node.
+    /// Comments retained from the source text.
     pub comments: Vec<Comment>,
-    /// Value stored by this public node.
+    /// Tokens retained from lexical analysis.
     pub tokens: Vec<Token>,
-    /// Value stored by this public node.
+    /// Diagnostics collected during recovery.
     pub errors: Vec<Diagnostic>,
 }
 
@@ -2731,6 +2731,7 @@ impl<'src> Parser<'src> {
         }
         if parts.iter().any(|part| part.flags.prefix.is_format()) {
             let mut values = Vec::new();
+            let string_range = TextRange::new(start, end);
             for part in parts {
                 if part.flags.prefix.is_format() {
                     self.check_legacy_fstring_constraints(
@@ -2746,17 +2747,26 @@ impl<'src> Parser<'src> {
                         part.flags.prefix.is_raw(),
                         part.flags.triple,
                         self.options.version,
+                        string_range,
                     )? {
                         for value in node.values {
                             append_fstring_value(&mut values, value);
                         }
                     }
                 } else if !part.value.is_empty() {
+                    let part_range = if self.options.version.supports(PythonVersion::Py312) {
+                        part.range
+                    } else {
+                        string_range
+                    };
                     append_fstring_value(
                         &mut values,
                         Expr::StringLiteral(ExprString {
-                            range: part.range,
-                            value: StringLiteralValue::new(vec![part]),
+                            range: part_range,
+                            value: StringLiteralValue::new(vec![StringLiteralPart {
+                                range: part_range,
+                                ..part
+                            }]),
                         }),
                     );
                 }
@@ -3458,9 +3468,10 @@ fn parse_fstring(
     raw: bool,
     triple: bool,
     version: PythonVersion,
+    location_range: TextRange,
 ) -> Result<Expr, ParseError> {
     let value_start = fstring_body_start(src, range, triple);
-    parse_fstring_value(src, range, value, raw, version, value_start)
+    parse_fstring_value(src, range, value, raw, version, value_start, location_range)
 }
 
 fn parse_fstring_value(
@@ -3470,6 +3481,7 @@ fn parse_fstring_value(
     raw: bool,
     version: PythonVersion,
     value_start: usize,
+    location_range: TextRange,
 ) -> Result<Expr, ParseError> {
     let value_start = value_start.min(src.len());
     let mut values = Vec::new();
@@ -3485,7 +3497,12 @@ fn parse_fstring_value(
             if !literal.is_empty() {
                 let literal_range =
                     TextRange::from_usize(value_start + literal_start, value_start + index);
-                values.push(fstring_literal(literal_range, std::mem::take(&mut literal), raw));
+                let node_range = if version.supports(PythonVersion::Py312) {
+                    literal_range
+                } else {
+                    location_range
+                };
+                values.push(fstring_literal(node_range, std::mem::take(&mut literal), raw));
             }
             let start = index + 1;
             let Some(field_end) = fstring_field_end(value, start) else {
@@ -3520,10 +3537,15 @@ fn parse_fstring_value(
                 let prefix = strip_fstring_comments(prefix);
                 let prefix_range =
                     TextRange::from_usize(value_start + start, value_start + start + prefix.len());
+                let node_range = if version.supports(PythonVersion::Py312) {
+                    prefix_range
+                } else {
+                    location_range
+                };
                 values.push(Expr::StringLiteral(ExprString {
-                    range: prefix_range,
+                    range: node_range,
                     value: StringLiteralValue::new(vec![StringLiteralPart {
-                        range: prefix_range,
+                        range: node_range,
                         flags: StringFlags {
                             prefix: Default::default(),
                             triple: false,
@@ -3551,14 +3573,22 @@ fn parse_fstring_value(
                         value_start + field_end,
                     );
                     Some(Box::new(parse_fstring_value(
-                        src, spec_range, spec, raw, version, spec_start,
+                        src,
+                        spec_range,
+                        spec,
+                        raw,
+                        version,
+                        spec_start,
+                        location_range,
                     )?))
                 }
                 None => None,
             };
             let field_range = TextRange::from_usize(value_start + index, value_start + end);
+            let node_range =
+                if version.supports(PythonVersion::Py312) { field_range } else { location_range };
             values.push(Expr::FormattedValue(ExprFormattedValue {
-                range: field_range,
+                range: node_range,
                 value: Box::new(expr),
                 conversion,
                 format_spec,
@@ -3582,9 +3612,12 @@ fn parse_fstring_value(
     if !literal.is_empty() {
         let literal_range =
             TextRange::from_usize(value_start + literal_start, value_start + value.len());
-        values.push(fstring_literal(literal_range, literal, raw));
+        let node_range =
+            if version.supports(PythonVersion::Py312) { literal_range } else { location_range };
+        values.push(fstring_literal(node_range, literal, raw));
     }
-    Ok(Expr::FString(ExprFString { range, values }))
+    let fstring_range = if version.supports(PythonVersion::Py312) { range } else { location_range };
+    Ok(Expr::FString(ExprFString { range: fstring_range, values }))
 }
 
 fn fstring_body_start(src: &str, range: TextRange, triple: bool) -> usize {
