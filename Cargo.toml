@@ -11,10 +11,6 @@ readme = "README.md"
 default = ["std", "nfkc"]
 std = []
 encoding = ["dep:encoding_rs"]
-bigint = []
-serde = []
-miette = []
-intern = []
 nfkc = ["dep:unicode-normalization"]
 
 [dependencies]

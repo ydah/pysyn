@@ -6,6 +6,18 @@ on:
   pull_request:
   schedule:
     - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      fuzz_long:
+        description: 'Run the release fuzz budget instead of the nightly smoke budget'
+        required: false
+        type: boolean
+        default: false
+      fuzz_seconds:
+        description: 'Fuzz duration in seconds for a manually requested long run'
+        required: false
+        type: string
+        default: '86400'
 
 jobs:
   fmt:
@@ -150,11 +162,15 @@ jobs:
           restore-keys: |
             criterion-${{ runner.os }}-
       - run: cargo bench --bench parser -- --noplot
+      - name: Enforce benchmark regression budget
+        run: python tools/benchmark_gate.py --criterion target/criterion --max-regression 0.10
 
   fuzz:
-    name: Rust fuzz and Python smoke (scheduled)
-    if: github.event_name == 'schedule'
+    name: Rust fuzz and Python smoke
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.fuzz_long)
     runs-on: ubuntu-latest
+    env:
+      FUZZ_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.fuzz_seconds || '600' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -166,9 +182,9 @@ jobs:
           components: rust-src
       - run: cargo install cargo-fuzz --locked
       - name: Run arbitrary-byte cargo-fuzz target
-        run: cargo fuzz run parse_bytes -- -max_total_time=600
+        run: cargo fuzz run parse_bytes -- -max_total_time="${FUZZ_SECONDS}"
       - name: Run structured-input cargo-fuzz target
-        run: cargo fuzz run parse_structured -- -max_total_time=600
+        run: cargo fuzz run parse_structured -- -max_total_time="${FUZZ_SECONDS}"
       - run: cargo build --quiet --release --bin pysyn
       - name: Run deterministic Python parser fuzz smoke test
         run: >-
