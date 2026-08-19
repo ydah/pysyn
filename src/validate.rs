@@ -51,6 +51,7 @@ struct ScopeState {
     kind: ScopeKind,
     all_bindings: HashSet<String>,
     seen_bindings: HashMap<String, TextRange>,
+    used_bindings: HashMap<String, TextRange>,
     globals: HashSet<String>,
     nonlocals: HashSet<String>,
     outer_loop_depth: usize,
@@ -83,6 +84,7 @@ impl Validator {
             kind,
             all_bindings,
             seen_bindings,
+            used_bindings: HashMap::new(),
             globals: HashSet::new(),
             nonlocals: HashSet::new(),
             outer_loop_depth,
@@ -105,10 +107,12 @@ impl Validator {
             self.error(range, "cannot assign to __debug__");
         }
         let Some(scope) = self.scopes.last_mut() else { return };
-        if scope.globals.contains(name) || scope.nonlocals.contains(name) {
-            return;
-        }
         scope.seen_bindings.entry(name.to_owned()).or_insert(range);
+    }
+
+    fn record_use(&mut self, name: &str, range: TextRange) {
+        let Some(scope) = self.scopes.last_mut() else { return };
+        scope.used_bindings.entry(name.to_owned()).or_insert(range);
     }
 
     fn declare_global(&mut self, name: &str, range: TextRange) {
@@ -128,6 +132,12 @@ impl Validator {
                 range,
                 format!("name '{name}' is assigned to before global declaration"),
             ));
+        } else if scope.used_bindings.contains_key(name) {
+            self.diagnostics.push(Diagnostic::error(
+                DiagnosticCode::Validation,
+                range,
+                format!("name '{name}' is used prior to global declaration"),
+            ));
         }
         scope.globals.insert(name.to_owned());
     }
@@ -140,6 +150,7 @@ impl Validator {
         let in_module = scope.kind == ScopeKind::Module;
         let has_global = scope.globals.contains(name);
         let assigned_before = scope.seen_bindings.contains_key(name);
+        let used_before = scope.used_bindings.contains_key(name);
         let has_enclosing_binding = self.has_enclosing_nonlocal_binding(name);
         if in_module {
             self.diagnostics.push(Diagnostic::error(
@@ -158,6 +169,12 @@ impl Validator {
                 DiagnosticCode::Validation,
                 range,
                 format!("name '{name}' is assigned to before nonlocal declaration"),
+            ));
+        } else if used_before {
+            self.diagnostics.push(Diagnostic::error(
+                DiagnosticCode::Validation,
+                range,
+                format!("name '{name}' is used prior to nonlocal declaration"),
             ));
         } else if !has_enclosing_binding {
             self.diagnostics.push(Diagnostic::error(
@@ -196,6 +213,12 @@ impl Validator {
                 }
             }
             Stmt::For(node) | Stmt::AsyncFor(node) => {
+                if matches!(statement, Stmt::AsyncFor(_))
+                    && self.level == ValidateLevel::Semantic
+                    && !self.current_scope_kind().is_async_function()
+                {
+                    self.error(node.range, "'async for' outside async function");
+                }
                 self.validate_expr(&node.iter);
                 self.validate_expr(&node.target);
                 self.record_target_bindings(&node.target);
@@ -255,6 +278,12 @@ impl Validator {
                 self.validate_block(&node.orelse);
             }
             Stmt::With(node) | Stmt::AsyncWith(node) => {
+                if matches!(statement, Stmt::AsyncWith(_))
+                    && self.level == ValidateLevel::Semantic
+                    && !self.current_scope_kind().is_async_function()
+                {
+                    self.error(node.range, "'async with' outside async function");
+                }
                 for item in &node.items {
                     self.validate_expr(&item.context_expr);
                     if let Some(target) = &item.optional_vars {
@@ -475,6 +504,10 @@ impl Validator {
         impl<'tree, 'validator> Visitor<'tree> for ExprValidator<'validator> {
             fn visit_expr(&mut self, expr: &'tree Expr) {
                 match expr {
+                    Expr::Name(node) if node.ctx == ExprContext::Load => {
+                        self.validator.record_use(&node.id, node.range);
+                        walk_expr(self, expr);
+                    }
                     Expr::Name(node) if node.ctx != ExprContext::Load && node.id.is_empty() => {
                         self.validator.error(node.range, "empty identifier");
                         walk_expr(self, expr);
@@ -505,7 +538,28 @@ impl Validator {
                         self.validator.validate_expr(&node.body);
                         self.validator.pop_scope();
                     }
-                    Expr::GeneratorExp(_) => {
+                    Expr::ListComp(node) | Expr::SetComp(node) | Expr::DictComp(node) => {
+                        if node.generators.iter().any(|generator| generator.is_async)
+                            && self.validator.level == ValidateLevel::Semantic
+                            && !self.validator.current_scope_kind().is_async_function()
+                        {
+                            self.validator.error(
+                                node.range,
+                                "asynchronous comprehension outside async function",
+                            );
+                        }
+                        walk_expr(self, expr);
+                    }
+                    Expr::GeneratorExp(node) => {
+                        if node.generators.iter().any(|generator| generator.is_async)
+                            && self.validator.level == ValidateLevel::Semantic
+                            && !self.validator.current_scope_kind().is_async_function()
+                        {
+                            self.validator.error(
+                                node.range,
+                                "asynchronous comprehension outside async function",
+                            );
+                        }
                         self.generator_depth += 1;
                         walk_expr(self, expr);
                         self.generator_depth = self.generator_depth.saturating_sub(1);

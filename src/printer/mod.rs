@@ -1665,12 +1665,15 @@ impl Unparser {
         let mut values = Vec::new();
         let positional = parameters.posonlyargs.iter().chain(&parameters.args).collect::<Vec<_>>();
         let default_start = positional.len().saturating_sub(parameters.defaults.len());
-        values.extend(positional.iter().enumerate().map(|(index, parameter)| {
+        for (index, parameter) in positional.iter().enumerate() {
             let default =
                 index.checked_sub(default_start).and_then(|index| parameters.defaults.get(index));
-            self.parameter(parameter, default)
-        }));
-        if !parameters.posonlyargs.is_empty() {
+            if index == parameters.posonlyargs.len() && !parameters.posonlyargs.is_empty() {
+                values.push("/".into());
+            }
+            values.push(self.parameter(parameter, default));
+        }
+        if !parameters.posonlyargs.is_empty() && parameters.args.is_empty() {
             values.push("/".into());
         }
         if let Some(vararg) = &parameters.vararg {

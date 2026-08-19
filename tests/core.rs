@@ -239,6 +239,15 @@ fn parses_comprehensions_and_parameter_sections() {
 }
 
 #[test]
+fn unparses_positional_only_parameters_in_their_original_section() {
+    let module = pysyn::parse_module("def open(filename, /, flag=\"r\", mode=0o666):\n    pass\n")
+        .expect("valid positional-only function");
+    let source = pysyn::printer::unparse(&module);
+    assert!(source.contains("def open(filename, /, flag = 'r', mode = 0o666):"));
+    assert!(pysyn::parse_module(&source).is_ok());
+}
+
+#[test]
 fn parses_multiline_and_delimited_constructs() {
     let source = concat!(
         "from package import (first as one, second,)\n",
@@ -373,6 +382,8 @@ fn rejects_malformed_literals_and_f_string_fields() {
         "f\"{!r}\"\n",
         "f\"{value!}\"\n",
         "f\"{value!q}\"\n",
+        "f\"{value!rr}\"\n",
+        "f\"{value!rfoo}\"\n",
         "f\"{1__0}\"\n",
         "1\\\n",
     ] {
@@ -476,4 +487,53 @@ fn preserves_unicode_identifiers_without_nfkc_feature() {
     let module = pysyn::parse_module("ﬁ = 1\n").expect("valid identifier");
     let Stmt::Assign(assign) = &module.body[0] else { panic!("expected assignment") };
     assert!(matches!(&assign.targets[0], Expr::Name(node) if node.id.as_ref() == "ﬁ"));
+}
+
+#[test]
+fn rejects_invalid_assignment_targets_and_inline_clauses() {
+    for source in
+        ["*value = source\n", "value, *left, *right = source\n", "if ready: pass else: pass\n"]
+    {
+        assert!(pysyn::parse_module(source).is_err(), "accepted invalid source: {source:?}");
+    }
+
+    for source in [
+        "value, *rest = source\n",
+        "value, (nested, *rest) = source\n",
+        "if ready: pass\nelse: pass\n",
+        "with (first, second) as context:\n    pass\n",
+    ] {
+        assert!(pysyn::parse_module(source).is_ok(), "rejected valid source: {source:?}");
+    }
+}
+
+#[test]
+fn validates_async_context_and_binding_declarations() {
+    for source in [
+        "async for item in items:\n    pass\n",
+        "async with resource:\n    pass\n",
+        "def function():\n    [item async for item in items]\n",
+        "print(value)\nglobal value\n",
+        "value = 1\nglobal value\n",
+        "global value\nvalue = 1\nglobal value\n",
+    ] {
+        let module = pysyn::parse_module(source).expect("semantic test source should parse");
+        assert!(
+            !validate(&module, ValidateLevel::Semantic).is_empty(),
+            "accepted source: {source:?}"
+        );
+    }
+
+    for source in [
+        "async def function():\n    async for item in items:\n        pass\n",
+        "async def function():\n    async with resource:\n        pass\n",
+        "async def function():\n    [item async for item in items]\n",
+        "global value\nvalue = 1\n",
+    ] {
+        let module = pysyn::parse_module(source).expect("valid semantic source");
+        assert!(
+            validate(&module, ValidateLevel::Semantic).is_empty(),
+            "rejected source: {source:?}"
+        );
+    }
 }

@@ -112,7 +112,9 @@ cargo +nightly fuzz run parse_structured -- -max_total_time=86400
 Criterion benchmarks for tokenization, parsing, and the complete
 parse/dump/unparse path are available through `cargo bench --bench parser`;
 the main-branch job caches Criterion's baseline directory so repeated runs can
-report regressions.
+report regressions. The benchmark gate fails when that baseline is missing; a
+cache miss must be primed by a successful benchmark run before the gate can
+report a regression result.
 
 ## Coverage
 

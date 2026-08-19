@@ -1244,6 +1244,15 @@ impl<'src> Parser<'src> {
                     break;
                 }
             }
+            if matches!(
+                self.current().kind,
+                TokenKind::Elif | TokenKind::Else | TokenKind::Except | TokenKind::Finally
+            ) && !matches!(
+                self.previous().kind,
+                TokenKind::Newline | TokenKind::NonLogicalNewline
+            ) {
+                return Err(self.error_here("invalid syntax"));
+            }
             Ok(statements)
         }
     }
@@ -2790,7 +2799,7 @@ impl<'src> Parser<'src> {
             let field_start = open + 1;
             let Some(field_end) = fstring_field_end(value, field_start) else { break };
             let inner = value.get(field_start..field_end).unwrap_or_default();
-            let (expression, _, _, _, _) = split_fstring_field(inner);
+            let (expression, _, _, _, _, _) = split_fstring_field(inner);
             let field_range =
                 TextRange::from_usize(body_start + open, body_start + field_end.saturating_add(1));
             if expression.contains(quote) {
@@ -2895,17 +2904,20 @@ impl<'src> Parser<'src> {
             return false;
         }
         let mut depth = 1u32;
-        for token in self.tokens.iter().skip(self.position + 1) {
+        let mut has_separator = false;
+        for (offset, token) in self.tokens.iter().skip(self.position + 1).enumerate() {
             match token.kind {
                 TokenKind::LPar | TokenKind::LSqb | TokenKind::LBrace => depth += 1,
                 TokenKind::RPar => {
                     depth = depth.saturating_sub(1);
                     if depth == 0 {
-                        return false;
+                        let next = self.tokens.get(self.position + offset + 2);
+                        return has_separator
+                            && !matches!(next.map(|token| token.kind), Some(TokenKind::As));
                     }
                 }
                 TokenKind::RSqb | TokenKind::RBrace => depth = depth.saturating_sub(1),
-                TokenKind::Comma | TokenKind::As if depth == 1 => return true,
+                TokenKind::Comma | TokenKind::As if depth == 1 => has_separator = true,
                 _ => {}
             }
         }
@@ -3263,6 +3275,10 @@ fn begins_expression(kind: TokenKind) -> bool {
 }
 
 fn mark_store(expression: Expr) -> Result<Expr, ParseError> {
+    mark_store_target(expression, false)
+}
+
+fn mark_store_target(expression: Expr, in_sequence: bool) -> Result<Expr, ParseError> {
     match expression {
         Expr::Name(mut node) => {
             if node.id.as_ref() == "__debug__" {
@@ -3282,19 +3298,43 @@ fn mark_store(expression: Expr) -> Result<Expr, ParseError> {
             node.ctx = ExprContext::Store;
             Ok(Expr::Subscript(node))
         }
-        Expr::Starred(mut node) => {
+        Expr::Starred(mut node) if in_sequence => {
             node.ctx = ExprContext::Store;
-            node.value = Box::new(mark_store(*node.value)?);
+            node.value = Box::new(mark_store_target(*node.value, false)?);
             Ok(Expr::Starred(node))
         }
+        Expr::Starred(node) => Err(ParseError::syntax(
+            node.range,
+            "starred assignment target must be in a list or tuple",
+        )),
         Expr::Tuple(mut node) => {
+            if node.elts.iter().filter(|element| matches!(element, Expr::Starred(_))).count() > 1 {
+                return Err(ParseError::syntax(
+                    node.range,
+                    "multiple starred expressions in assignment",
+                ));
+            }
             node.ctx = ExprContext::Store;
-            node.elts = node.elts.into_iter().map(mark_store).collect::<Result<_, _>>()?;
+            node.elts = node
+                .elts
+                .into_iter()
+                .map(|element| mark_store_target(element, true))
+                .collect::<Result<_, _>>()?;
             Ok(Expr::Tuple(node))
         }
         Expr::List(mut node) => {
+            if node.elts.iter().filter(|element| matches!(element, Expr::Starred(_))).count() > 1 {
+                return Err(ParseError::syntax(
+                    node.range,
+                    "multiple starred expressions in assignment",
+                ));
+            }
             node.ctx = ExprContext::Store;
-            node.elts = node.elts.into_iter().map(mark_store).collect::<Result<_, _>>()?;
+            node.elts = node
+                .elts
+                .into_iter()
+                .map(|element| mark_store_target(element, true))
+                .collect::<Result<_, _>>()?;
             Ok(Expr::List(node))
         }
         other => Err(ParseError::syntax(other.range(), "cannot assign to expression")),
@@ -3453,12 +3493,21 @@ fn parse_fstring_value(
             };
             let end = field_end + 1;
             let inner = value.get(start..field_end).unwrap_or("");
-            let (expression_text, conversion, format_spec, debug_prefix, has_conversion) =
-                split_fstring_field(inner);
+            let (
+                expression_text,
+                conversion,
+                conversion_tail,
+                format_spec,
+                debug_prefix,
+                has_conversion,
+            ) = split_fstring_field(inner);
             if expression_text.is_empty() {
                 return Err(ParseError::syntax(range, "f-string: empty expression not allowed"));
             }
-            if has_conversion && !matches!(conversion, Some('r' | 's' | 'a')) {
+            if has_conversion
+                && (!matches!(conversion, Some('r' | 's' | 'a'))
+                    || conversion_tail.is_some_and(|tail| !tail.trim().is_empty()))
+            {
                 return Err(ParseError::syntax(range, "f-string: invalid conversion character"));
             }
             if !version.supports(PythonVersion::Py312) && has_unquoted_newline(expression_text) {
@@ -3709,7 +3758,9 @@ fn normalize_fstring_expression(value: &str) -> String {
     output.trim().to_owned()
 }
 
-fn split_fstring_field(field: &str) -> (&str, Option<char>, Option<&str>, Option<&str>, bool) {
+fn split_fstring_field(
+    field: &str,
+) -> (&str, Option<char>, Option<&str>, Option<&str>, Option<&str>, bool) {
     let mut nesting = 0u32;
     let mut debug_at = None;
     let mut conversion_at = None;
@@ -3750,12 +3801,20 @@ fn split_fstring_field(field: &str) -> (&str, Option<char>, Option<&str>, Option
     let expression_end = debug_at.or(conversion_at).or(format_at).unwrap_or(field.len());
     let expression = field[..expression_end].trim();
     let conversion = conversion_at.and_then(|index| field[index + 1..].chars().next());
+    let conversion_tail = conversion_at.map(|index| {
+        let conversion_end = field[index + 1..]
+            .chars()
+            .next()
+            .map_or(index + 1, |character| index + 1 + character.len_utf8());
+        let end = format_at.unwrap_or(field.len());
+        field.get(conversion_end..end).unwrap_or_default()
+    });
     let format_spec = format_at.map(|index| field[index + 1..].trim());
     let debug_prefix = debug_at.map(|_| {
         let end = conversion_at.or(format_at).unwrap_or(field.len());
         &field[..end]
     });
-    (expression, conversion, format_spec, debug_prefix, conversion_at.is_some())
+    (expression, conversion, conversion_tail, format_spec, debug_prefix, conversion_at.is_some())
 }
 
 trait FStringSuffix {

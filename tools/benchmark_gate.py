@@ -20,11 +20,11 @@ def run(args: argparse.Namespace) -> int:
     changes = sorted(args.criterion.glob("*/**/change/estimates.json"))
     if not changes:
         print(
-            "warning: Criterion baseline is unavailable; regression gate will run "
-            "after the benchmark cache is primed",
+            "error: Criterion baseline is unavailable; prime target/criterion "
+            "before running the regression gate",
             file=sys.stderr,
         )
-        return 0
+        return 2
 
     failures: list[tuple[str, float]] = []
     for path in changes:
