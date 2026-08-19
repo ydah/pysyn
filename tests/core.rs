@@ -494,6 +494,10 @@ fn decodes_declared_non_utf8_source() {
         pysyn::SourceFile::from_bytes("cp932.py", b"# coding: cp932\n\x93\xfa\x96\x7b = 1\n")
             .expect("cp932 source should decode");
     assert!(source.text().contains("日本 = 1"));
+
+    let source = pysyn::SourceFile::from_bytes("cp1252.py", b"# coding: cp1252\nprice = '\x80'\n")
+        .expect("cp1252 source should decode");
+    assert!(source.text().contains("price = '€'"));
 }
 
 #[test]

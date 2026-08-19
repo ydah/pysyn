@@ -413,6 +413,7 @@ fn decode_declared(name: &str, bytes: &[u8]) -> Result<String, SourceError> {
         }
         let encoding_label = match normalized.as_str() {
             "cp932" | "ms932" | "windows31j" => "shift_jis",
+            "cp1252" | "windows1252" => "windows-1252",
             _ => name,
         };
         if let Some(encoding) = encoding_rs::Encoding::for_label(encoding_label.as_bytes()) {
