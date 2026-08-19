@@ -10,100 +10,100 @@ use std::fmt;
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 /// Specifies whether an expression is being loaded, stored, or deleted.
 pub enum ExprContext {
-    /// AST variant for `Load` syntax.
+    /// Reads the value of the expression target.
     Load,
-    /// AST variant for `Store` syntax.
+    /// Assigns a value to the expression target.
     Store,
-    /// AST variant for `Del` syntax.
+    /// Deletes the expression target.
     Del,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 /// Represents a boolean conjunction or disjunction.
 pub enum BoolOperator {
-    /// AST variant for `And` syntax.
+    /// Short-circuit boolean conjunction.
     And,
-    /// AST variant for `Or` syntax.
+    /// Short-circuit boolean disjunction.
     Or,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 /// Represents a unary Python operator.
 pub enum UnaryOperator {
-    /// AST variant for `Invert` syntax.
+    /// Bitwise inversion (`~`).
     Invert,
-    /// AST variant for `Not` syntax.
+    /// Boolean negation (`not`).
     Not,
-    /// AST variant for `UAdd` syntax.
+    /// Unary plus (`+`).
     UAdd,
-    /// AST variant for `USub` syntax.
+    /// Unary minus (`-`).
     USub,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 /// Represents a binary Python operator.
 pub enum BinaryOperator {
-    /// AST variant for `Add` syntax.
+    /// Addition (`+`).
     Add,
-    /// AST variant for `Sub` syntax.
+    /// Subtraction (`-`).
     Sub,
-    /// AST variant for `Mult` syntax.
+    /// Multiplication (`*`).
     Mult,
-    /// AST variant for `MatMult` syntax.
+    /// Matrix multiplication (`@`).
     MatMult,
-    /// AST variant for `Div` syntax.
+    /// True division (`/`).
     Div,
-    /// AST variant for `FloorDiv` syntax.
+    /// Floor division (`//`).
     FloorDiv,
-    /// AST variant for `Mod` syntax.
+    /// Remainder (`%`).
     Mod,
-    /// AST variant for `Pow` syntax.
+    /// Exponentiation (`**`).
     Pow,
-    /// AST variant for `LShift` syntax.
+    /// Left shift (`<<`).
     LShift,
-    /// AST variant for `RShift` syntax.
+    /// Right shift (`>>`).
     RShift,
-    /// AST variant for `BitOr` syntax.
+    /// Bitwise OR (`|`).
     BitOr,
-    /// AST variant for `BitXor` syntax.
+    /// Bitwise XOR (`^`).
     BitXor,
-    /// AST variant for `BitAnd` syntax.
+    /// Bitwise AND (`&`).
     BitAnd,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 /// Represents a Python comparison operator.
 pub enum CompareOperator {
-    /// AST variant for `Eq` syntax.
+    /// Equality comparison (`==`).
     Eq,
-    /// AST variant for `NotEq` syntax.
+    /// Inequality comparison (`!=`).
     NotEq,
-    /// AST variant for `Lt` syntax.
+    /// Less-than comparison (`<`).
     Lt,
-    /// AST variant for `LtE` syntax.
+    /// Less-than-or-equal comparison (`<=`).
     LtE,
-    /// AST variant for `Gt` syntax.
+    /// Greater-than comparison (`>`).
     Gt,
-    /// AST variant for `GtE` syntax.
+    /// Greater-than-or-equal comparison (`>=`).
     GtE,
-    /// AST variant for `In` syntax.
+    /// Membership comparison (`in`).
     In,
-    /// AST variant for `NotIn` syntax.
+    /// Non-membership comparison (`not in`).
     NotIn,
-    /// AST variant for `Is` syntax.
+    /// Identity comparison (`is`).
     Is,
-    /// AST variant for `IsNot` syntax.
+    /// Non-identity comparison (`is not`).
     IsNot,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 /// Represents the numeric literal categories preserved by the AST.
 pub enum Number {
-    /// AST variant for `Int` syntax.
+    /// An integer literal with preserved source spelling.
     Int(Int),
-    /// AST variant for `Float` syntax.
+    /// A floating-point literal.
     Float(f64),
-    /// AST variant for `Complex` syntax.
+    /// A complex literal with real and imaginary components.
     Complex {
         /// Real component.
         real: f64,
@@ -202,63 +202,63 @@ pub struct TypeIgnore {
 #[derive(Clone, Debug, PartialEq)]
 /// Represents a Python statement and its associated source range.
 pub enum Stmt {
-    /// AST variant for `FunctionDef` syntax.
+    /// A Python `FunctionDef` statement node.
     FunctionDef(Box<StmtFunctionDef>),
-    /// AST variant for `AsyncFunctionDef` syntax.
+    /// A Python `AsyncFunctionDef` statement node.
     AsyncFunctionDef(Box<StmtFunctionDef>),
-    /// AST variant for `ClassDef` syntax.
+    /// A Python `ClassDef` statement node.
     ClassDef(Box<StmtClassDef>),
-    /// AST variant for `Return` syntax.
+    /// A Python `Return` statement node.
     Return(StmtReturn),
-    /// AST variant for `Delete` syntax.
+    /// A Python `Delete` statement node.
     Delete(StmtDelete),
-    /// AST variant for `Assign` syntax.
+    /// A Python `Assign` statement node.
     Assign(StmtAssign),
-    /// AST variant for `TypeAlias` syntax.
+    /// A Python `TypeAlias` statement node.
     TypeAlias(StmtTypeAlias),
-    /// AST variant for `AugAssign` syntax.
+    /// A Python `AugAssign` statement node.
     AugAssign(StmtAugAssign),
-    /// AST variant for `AnnAssign` syntax.
+    /// A Python `AnnAssign` statement node.
     AnnAssign(StmtAnnAssign),
-    /// AST variant for `For` syntax.
+    /// A Python `For` statement node.
     For(StmtFor),
-    /// AST variant for `AsyncFor` syntax.
+    /// A Python `AsyncFor` statement node.
     AsyncFor(StmtFor),
-    /// AST variant for `While` syntax.
+    /// A Python `While` statement node.
     While(StmtWhile),
-    /// AST variant for `If` syntax.
+    /// A Python `If` statement node.
     If(StmtIf),
-    /// AST variant for `With` syntax.
+    /// A Python `With` statement node.
     With(StmtWith),
-    /// AST variant for `AsyncWith` syntax.
+    /// A Python `AsyncWith` statement node.
     AsyncWith(StmtWith),
-    /// AST variant for `Match` syntax.
+    /// A Python `Match` statement node.
     Match(StmtMatch),
-    /// AST variant for `Raise` syntax.
+    /// A Python `Raise` statement node.
     Raise(StmtRaise),
-    /// AST variant for `Try` syntax.
+    /// A Python `Try` statement node.
     Try(Box<StmtTry>),
-    /// AST variant for `TryStar` syntax.
+    /// A Python `TryStar` statement node.
     TryStar(Box<StmtTry>),
-    /// AST variant for `Assert` syntax.
+    /// A Python `Assert` statement node.
     Assert(StmtAssert),
-    /// AST variant for `Import` syntax.
+    /// A Python `Import` statement node.
     Import(StmtImport),
-    /// AST variant for `ImportFrom` syntax.
+    /// A Python `ImportFrom` statement node.
     ImportFrom(StmtImportFrom),
-    /// AST variant for `Global` syntax.
+    /// A Python `Global` statement node.
     Global(StmtNames),
-    /// AST variant for `Nonlocal` syntax.
+    /// A Python `Nonlocal` statement node.
     Nonlocal(StmtNames),
-    /// AST variant for `Expr` syntax.
+    /// A Python `Expr` statement node.
     Expr(StmtExpr),
-    /// AST variant for `Pass` syntax.
+    /// A Python `Pass` statement node.
     Pass(StmtSimple),
-    /// AST variant for `Break` syntax.
+    /// A Python `Break` statement node.
     Break(StmtSimple),
-    /// AST variant for `Continue` syntax.
+    /// A Python `Continue` statement node.
     Continue(StmtSimple),
-    /// AST variant for `Invalid` syntax.
+    /// A Python `Invalid` statement node.
     Invalid(StmtInvalid),
 }
 
@@ -516,71 +516,71 @@ pub struct StmtInvalid {
 #[derive(Clone, Debug, PartialEq)]
 /// Represents a Python expression and its associated source range.
 pub enum Expr {
-    /// AST variant for `BoolOp` syntax.
+    /// A Python `BoolOp` expression node.
     BoolOp(ExprBoolOp),
-    /// AST variant for `NamedExpr` syntax.
+    /// A Python `NamedExpr` expression node.
     NamedExpr(ExprNamedExpr),
-    /// AST variant for `BinOp` syntax.
+    /// A Python `BinOp` expression node.
     BinOp(ExprBinOp),
-    /// AST variant for `UnaryOp` syntax.
+    /// A Python `UnaryOp` expression node.
     UnaryOp(ExprUnaryOp),
-    /// AST variant for `Lambda` syntax.
+    /// A Python `Lambda` expression node.
     Lambda(Box<ExprLambda>),
-    /// AST variant for `IfExp` syntax.
+    /// A Python `IfExp` expression node.
     IfExp(ExprIfExp),
-    /// AST variant for `Dict` syntax.
+    /// A Python `Dict` expression node.
     Dict(ExprDict),
-    /// AST variant for `Set` syntax.
+    /// A Python `Set` expression node.
     Set(ExprSet),
-    /// AST variant for `ListComp` syntax.
+    /// A Python `ListComp` expression node.
     ListComp(ExprComprehension),
-    /// AST variant for `SetComp` syntax.
+    /// A Python `SetComp` expression node.
     SetComp(ExprComprehension),
-    /// AST variant for `DictComp` syntax.
+    /// A Python `DictComp` expression node.
     DictComp(ExprComprehension),
-    /// AST variant for `GeneratorExp` syntax.
+    /// A Python `GeneratorExp` expression node.
     GeneratorExp(ExprComprehension),
-    /// AST variant for `Await` syntax.
+    /// A Python `Await` expression node.
     Await(ExprUnaryValue),
-    /// AST variant for `Yield` syntax.
+    /// A Python `Yield` expression node.
     Yield(ExprUnaryValue),
-    /// AST variant for `YieldFrom` syntax.
+    /// A Python `YieldFrom` expression node.
     YieldFrom(ExprUnaryValue),
-    /// AST variant for `Compare` syntax.
+    /// A Python `Compare` expression node.
     Compare(Box<ExprCompare>),
-    /// AST variant for `Call` syntax.
+    /// A Python `Call` expression node.
     Call(Box<ExprCall>),
-    /// AST variant for `FString` syntax.
+    /// A Python `FString` expression node.
     FString(ExprFString),
-    /// AST variant for `FormattedValue` syntax.
+    /// A Python `FormattedValue` expression node.
     FormattedValue(ExprFormattedValue),
-    /// AST variant for `StringLiteral` syntax.
+    /// A Python `StringLiteral` expression node.
     StringLiteral(ExprString),
-    /// AST variant for `BytesLiteral` syntax.
+    /// A Python `BytesLiteral` expression node.
     BytesLiteral(ExprString),
-    /// AST variant for `NumberLiteral` syntax.
+    /// A Python `NumberLiteral` expression node.
     NumberLiteral(ExprNumber),
-    /// AST variant for `BooleanLiteral` syntax.
+    /// A Python `BooleanLiteral` expression node.
     BooleanLiteral(ExprBoolean),
-    /// AST variant for `NoneLiteral` syntax.
+    /// A Python `NoneLiteral` expression node.
     NoneLiteral(ExprLiteral),
-    /// AST variant for `EllipsisLiteral` syntax.
+    /// A Python `EllipsisLiteral` expression node.
     EllipsisLiteral(ExprLiteral),
-    /// AST variant for `Attribute` syntax.
+    /// A Python `Attribute` expression node.
     Attribute(ExprAttribute),
-    /// AST variant for `Subscript` syntax.
+    /// A Python `Subscript` expression node.
     Subscript(ExprSubscript),
-    /// AST variant for `Starred` syntax.
+    /// A Python `Starred` expression node.
     Starred(ExprStarred),
-    /// AST variant for `Name` syntax.
+    /// A Python `Name` expression node.
     Name(ExprName),
-    /// AST variant for `List` syntax.
+    /// A Python `List` expression node.
     List(ExprSequence),
-    /// AST variant for `Tuple` syntax.
+    /// A Python `Tuple` expression node.
     Tuple(ExprSequence),
-    /// AST variant for `Slice` syntax.
+    /// A Python `Slice` expression node.
     Slice(ExprSlice),
-    /// AST variant for `Invalid` syntax.
+    /// A Python `Invalid` expression node.
     Invalid(ExprInvalid),
 }
 
@@ -940,23 +940,23 @@ pub struct MatchCase {
 #[derive(Clone, Debug, PartialEq)]
 /// Represents a structural-pattern matching node.
 pub enum Pattern {
-    /// AST variant for `Value` syntax.
+    /// A `Value` structural pattern node.
     Value(PatternValue),
-    /// AST variant for `Singleton` syntax.
+    /// A `Singleton` structural pattern node.
     Singleton(PatternSingleton),
-    /// AST variant for `Sequence` syntax.
+    /// A `Sequence` structural pattern node.
     Sequence(PatternSequence),
-    /// AST variant for `Mapping` syntax.
+    /// A `Mapping` structural pattern node.
     Mapping(PatternMapping),
-    /// AST variant for `Class` syntax.
+    /// A `Class` structural pattern node.
     Class(PatternClass),
-    /// AST variant for `Star` syntax.
+    /// A `Star` structural pattern node.
     Star(PatternStar),
-    /// AST variant for `As` syntax.
+    /// A `As` structural pattern node.
     As(PatternAs),
-    /// AST variant for `Or` syntax.
+    /// A `Or` structural pattern node.
     Or(PatternOr),
-    /// AST variant for `Invalid` syntax.
+    /// A `Invalid` structural pattern node.
     Invalid(PatternInvalid),
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -1044,11 +1044,11 @@ pub struct PatternInvalid {
 #[derive(Clone, Debug, PartialEq)]
 /// Represents a Python 3.12+ type parameter declaration.
 pub enum TypeParam {
-    /// AST variant for `TypeVar` syntax.
+    /// A `TypeVar` type parameter node.
     TypeVar(TypeParamData),
-    /// AST variant for `ParamSpec` syntax.
+    /// A `ParamSpec` type parameter node.
     ParamSpec(TypeParamData),
-    /// AST variant for `TypeVarTuple` syntax.
+    /// A `TypeVarTuple` type parameter node.
     TypeVarTuple(TypeParamData),
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -1240,11 +1240,11 @@ impl Ranged for TypeParam {
 #[derive(Copy, Clone, Debug)]
 /// References one of the AST categories exposed to generic traversals.
 pub enum AnyNodeRef<'a> {
-    /// AST variant for `Stmt` syntax.
+    /// A reference to an `Stmt` AST node.
     Stmt(&'a Stmt),
-    /// AST variant for `Expr` syntax.
+    /// A reference to an `Expr` AST node.
     Expr(&'a Expr),
-    /// AST variant for `Pattern` syntax.
+    /// A reference to an `Pattern` AST node.
     Pattern(&'a Pattern),
 }
 

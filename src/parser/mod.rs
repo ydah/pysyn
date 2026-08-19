@@ -15,11 +15,11 @@ use unicode_normalization::UnicodeNormalization;
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 /// Selects the grammar entry point used to parse source text.
 pub enum SourceMode {
-    /// AST variant for `Module` syntax.
+    /// Parses a complete module.
     Module,
-    /// AST variant for `Expression` syntax.
+    /// Parses a single expression.
     Expression,
-    /// AST variant for `Interactive` syntax.
+    /// Parses one interactive input unit.
     Interactive,
 }
 
@@ -67,9 +67,9 @@ impl Default for ParseOptions {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 /// Selects strict parsing or bounded error recovery.
 pub enum ParseMode {
-    /// AST variant for `Strict` syntax.
+    /// Stops at the first syntax error.
     Strict,
-    /// AST variant for `Recover` syntax.
+    /// Builds a partial tree while collecting syntax errors.
     Recover,
 }
 

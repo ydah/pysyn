@@ -12,9 +12,9 @@ use crate::visit::{walk_expr, Visitor};
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 /// Selects syntax-only or syntax-and-semantic validation.
 pub enum ValidateLevel {
-    /// AST variant for `Syntax` syntax.
+    /// Checks structural and syntax-level invariants.
     Syntax,
-    /// AST variant for `Semantic` syntax.
+    /// Checks syntax and binding-related semantic invariants.
     Semantic,
 }
 
