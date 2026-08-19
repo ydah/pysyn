@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import io
 import tokenize
 from dataclasses import dataclass
@@ -46,9 +47,21 @@ def builtin_cases(version: tuple[int, int]) -> list[Case]:
     return [case for case in BUILTIN_CASES if version_at_least(version, case.minimum_version)]
 
 
-def source_cases(paths: Iterable[Path], limit: int | None = None) -> list[Case]:
+def matches_exclude(path: Path, patterns: Iterable[str]) -> bool:
+    """Return whether a path matches an exclusion pattern in either form."""
+
+    candidates = (path.as_posix(), path.resolve().as_posix())
+    return any(fnmatch.fnmatch(candidate, pattern) for candidate in candidates for pattern in patterns)
+
+
+def source_cases(
+    paths: Iterable[Path],
+    limit: int | None = None,
+    exclude: Iterable[str] = (),
+) -> list[Case]:
     """Read Python files from paths without downloading or materializing a corpus."""
 
+    exclude_patterns = tuple(exclude)
     files: list[Path] = []
     for path in paths:
         if path.is_file() and path.suffix == ".py":
@@ -58,6 +71,8 @@ def source_cases(paths: Iterable[Path], limit: int | None = None) -> list[Case]:
 
     cases: list[Case] = []
     for path in sorted(set(files)):
+        if matches_exclude(path, exclude_patterns):
+            continue
         if limit is not None and len(cases) >= limit:
             break
         try:

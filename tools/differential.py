@@ -35,6 +35,13 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--timeout", type=float, default=5.0, help="per-process timeout in seconds")
     result.add_argument("--include-fstrings", action="store_true", help="include version-dependent f-string tokens")
     result.add_argument("--strict-ast", action="store_true", help="fail AST checks when location-complete output is unavailable")
+    result.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help="exclude files whose POSIX path matches GLOB; may be repeated",
+    )
     result.add_argument("--max-failures", type=int, default=20, help="number of failures printed")
     result.add_argument("--report", type=Path, help="write a JSON report")
     return result
@@ -72,7 +79,7 @@ def run(args: argparse.Namespace) -> int:
     if args.strict_ast and version not in STRICT_AST_VERSIONS:
         print("warning: strict AST locations are supported only for CPython 3.10–3.13", file=sys.stderr)
     pysyn = resolve_pysyn(args.pysyn)
-    cases = source_cases(args.paths, args.limit) if args.paths else builtin_cases(version)
+    cases = source_cases(args.paths, args.limit, args.exclude) if args.paths else builtin_cases(version)
     if args.limit is not None and not args.paths:
         cases = cases[: args.limit]
     if not cases:

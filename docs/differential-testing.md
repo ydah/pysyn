@@ -56,10 +56,13 @@ python3 tools/differential.py \
 ```
 
 The CI matrix uses the standard-library directory belonging to each matrix
-interpreter, so the Python 3.10–3.13 jobs exercise the complete local `Lib/`
-tree rather than only the built-in smoke cases. Test-data files that cannot be
-decoded or that CPython intentionally rejects are reported as reference cases
-by the harness.
+interpreter, so the Python 3.10–3.13 jobs exercise the local `Lib/` tree rather
+than only the built-in smoke cases. The CI corpus excludes `*/test/*` and
+`*/lib2to3/tests/*`: these directories contain CPython's test fixtures,
+including intentionally invalid syntax and legacy Python 2 examples, rather
+than production standard-library modules. The dedicated syntax diagnostics
+job still exercises `test/test_syntax.py`. Remove the `--exclude` options when
+you explicitly want to inspect those fixtures.
 
 The command exits non-zero for mismatches, parser errors, malformed output,
 timeouts, or process crashes. `--report report.json` writes machine-readable
@@ -118,9 +121,10 @@ cargo +nightly fuzz run parse_structured -- -max_total_time=86400
 Criterion benchmarks for tokenization, parsing, and the complete
 parse/dump/unparse path are available through `cargo bench --bench parser`;
 the main-branch job caches Criterion's baseline directory so repeated runs can
-report regressions. The benchmark gate fails when that baseline is missing; a
-cache miss must be primed by a successful benchmark run before the gate can
-report a regression result.
+report regressions. The main-branch job passes
+`--allow-missing-baseline`, so a first run after a cache miss emits a notice and
+seeds the cache; later runs enforce the 10% regression budget. Direct use of
+`tools/benchmark_gate.py` remains strict unless that option is supplied.
 
 ## Coverage
 

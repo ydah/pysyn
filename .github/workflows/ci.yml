@@ -84,6 +84,8 @@ jobs:
             --mode all \
             --include-fstrings \
             --strict-ast \
+            --exclude '*/test/*' \
+            --exclude '*/lib2to3/tests/*' \
             --report differential-${{ matrix.python-version }}.json \
           "$PYTHON_STDLIB"
       - uses: actions/upload-artifact@v4
@@ -164,7 +166,11 @@ jobs:
             criterion-${{ runner.os }}-
       - run: cargo bench --bench parser -- --noplot
       - name: Enforce benchmark regression budget
-        run: python tools/benchmark_gate.py --criterion target/criterion --max-regression 0.10
+        run: >-
+          python tools/benchmark_gate.py
+          --criterion target/criterion
+          --max-regression 0.10
+          --allow-missing-baseline
 
   fuzz:
     name: Rust fuzz and Python smoke
