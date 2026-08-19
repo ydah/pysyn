@@ -2799,7 +2799,7 @@ impl<'src> Parser<'src> {
             let field_start = open + 1;
             let Some(field_end) = fstring_field_end(value, field_start) else { break };
             let inner = value.get(field_start..field_end).unwrap_or_default();
-            let (expression, _, _, _, _, _) = split_fstring_field(inner);
+            let expression = split_fstring_field(inner).expression;
             let field_range =
                 TextRange::from_usize(body_start + open, body_start + field_end.saturating_add(1));
             if expression.contains(quote) {
@@ -3493,14 +3493,14 @@ fn parse_fstring_value(
             };
             let end = field_end + 1;
             let inner = value.get(start..field_end).unwrap_or("");
-            let (
-                expression_text,
+            let FStringField {
+                expression: expression_text,
                 conversion,
                 conversion_tail,
                 format_spec,
                 debug_prefix,
                 has_conversion,
-            ) = split_fstring_field(inner);
+            } = split_fstring_field(inner);
             if expression_text.is_empty() {
                 return Err(ParseError::syntax(range, "f-string: empty expression not allowed"));
             }
@@ -3758,9 +3758,16 @@ fn normalize_fstring_expression(value: &str) -> String {
     output.trim().to_owned()
 }
 
-fn split_fstring_field(
-    field: &str,
-) -> (&str, Option<char>, Option<&str>, Option<&str>, Option<&str>, bool) {
+struct FStringField<'a> {
+    expression: &'a str,
+    conversion: Option<char>,
+    conversion_tail: Option<&'a str>,
+    format_spec: Option<&'a str>,
+    debug_prefix: Option<&'a str>,
+    has_conversion: bool,
+}
+
+fn split_fstring_field(field: &str) -> FStringField<'_> {
     let mut nesting = 0u32;
     let mut debug_at = None;
     let mut conversion_at = None;
@@ -3814,7 +3821,14 @@ fn split_fstring_field(
         let end = conversion_at.or(format_at).unwrap_or(field.len());
         &field[..end]
     });
-    (expression, conversion, conversion_tail, format_spec, debug_prefix, conversion_at.is_some())
+    FStringField {
+        expression,
+        conversion,
+        conversion_tail,
+        format_spec,
+        debug_prefix,
+        has_conversion: conversion_at.is_some(),
+    }
 }
 
 trait FStringSuffix {
