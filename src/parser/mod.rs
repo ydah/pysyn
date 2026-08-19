@@ -68,6 +68,9 @@ pub struct Parsed {
 
 /// Parses a complete Python module in strict mode.
 pub fn parse_module(src: &str) -> Result<ModModule, ParseError> {
+    if src.len() > u32::MAX as usize {
+        return Err(ParseError::source_too_large());
+    }
     let options = ParseOptions { mode: SourceMode::Module, ..ParseOptions::default() };
     let mut parser = Parser::new(src, options);
     let module = parser.parse_module_inner()?;
@@ -81,6 +84,9 @@ pub fn parse_module(src: &str) -> Result<ModModule, ParseError> {
 
 /// Parses one Python expression in strict mode.
 pub fn parse_expression(src: &str) -> Result<Expr, ParseError> {
+    if src.len() > u32::MAX as usize {
+        return Err(ParseError::source_too_large());
+    }
     let options = ParseOptions { mode: SourceMode::Expression, ..ParseOptions::default() };
     let mut parser = Parser::new(src, options);
     let first = parser.expression(0)?;
@@ -89,11 +95,30 @@ pub fn parse_expression(src: &str) -> Result<Expr, ParseError> {
     if !parser.at(TokenKind::EndMarker) {
         return Err(parser.error_here("unexpected token after expression"));
     }
+    if let Some(error) =
+        parser.errors.into_iter().find(|diagnostic| diagnostic.severity == Severity::Error)
+    {
+        return Err(ParseError { diagnostic: error });
+    }
     Ok(expr)
 }
 
 /// Parses source with the requested recovery and version options.
 pub fn parse(src: &str, options: ParseOptions) -> Parsed {
+    if src.len() > u32::MAX as usize {
+        let error = ParseError::source_too_large().diagnostic;
+        return Parsed {
+            module: ModModule {
+                body: Vec::new(),
+                type_ignores: Vec::new(),
+                range: TextRange::empty(TextSize::new(u32::MAX)),
+                source: None,
+            },
+            comments: Vec::new(),
+            tokens: Vec::new(),
+            errors: vec![error],
+        };
+    }
     let escape_warnings = collect_invalid_escape_warnings(src, options.version);
     let mut parser = Parser::new(src, options);
     let module = match parser.options.mode {
@@ -1894,7 +1919,7 @@ impl<'src> Parser<'src> {
             })),
             TokenKind::None => Ok(Expr::NoneLiteral(ExprLiteral { range: token.range })),
             TokenKind::Ellipsis => Ok(Expr::EllipsisLiteral(ExprLiteral { range: token.range })),
-            TokenKind::Int | TokenKind::Float | TokenKind::Complex => Ok(self.number_expr(token)),
+            TokenKind::Int | TokenKind::Float | TokenKind::Complex => self.number_expr(token),
             TokenKind::String { prefix, triple } => self.string_expr(token, prefix, triple),
             TokenKind::LPar => {
                 let first = if self.at(TokenKind::RPar) { None } else { Some(self.expression(0)?) };
@@ -2699,7 +2724,7 @@ impl<'src> Parser<'src> {
             let field_start = open + 1;
             let Some(field_end) = fstring_field_end(value, field_start) else { break };
             let inner = value.get(field_start..field_end).unwrap_or_default();
-            let (expression, _, _, _) = split_fstring_field(inner);
+            let (expression, _, _, _, _) = split_fstring_field(inner);
             let field_range =
                 TextRange::from_usize(body_start + open, body_start + field_end.saturating_add(1));
             if expression.contains(quote) {
@@ -2748,18 +2773,24 @@ impl<'src> Parser<'src> {
         }
     }
 
-    fn number_expr(&self, token: Token) -> Expr {
+    fn number_expr(&self, token: Token) -> Result<Expr, ParseError> {
         let raw: Box<str> = self.src[token.range].into();
         let clean = raw.replace('_', "");
-        let value = match token.kind {
-            TokenKind::Float => Number::Float(clean.parse().unwrap_or(0.0)),
-            TokenKind::Complex => Number::Complex {
-                real: 0.0,
-                imag: clean.trim_end_matches(['j', 'J']).parse().unwrap_or(0.0),
-            },
-            _ => Number::Int(Int::new(clean)),
-        };
-        Expr::NumberLiteral(ExprNumber { range: token.range, value, raw })
+        let value =
+            match token.kind {
+                TokenKind::Float => Number::Float(clean.parse().map_err(|_| {
+                    ParseError::syntax(token.range, "invalid floating-point literal")
+                })?),
+                TokenKind::Complex => Number::Complex {
+                    real: 0.0,
+                    imag: clean
+                        .trim_end_matches(['j', 'J'])
+                        .parse()
+                        .map_err(|_| ParseError::syntax(token.range, "invalid complex literal"))?,
+                },
+                _ => Number::Int(Int::new(clean)),
+            };
+        Ok(Expr::NumberLiteral(ExprNumber { range: token.range, value, raw }))
     }
 
     fn dotted_name(&mut self) -> Result<String, ParseError> {
@@ -3356,8 +3387,14 @@ fn parse_fstring_value(
             };
             let end = field_end + 1;
             let inner = value.get(start..field_end).unwrap_or("");
-            let (expression_text, conversion, format_spec, debug_prefix) =
+            let (expression_text, conversion, format_spec, debug_prefix, has_conversion) =
                 split_fstring_field(inner);
+            if expression_text.is_empty() {
+                return Err(ParseError::syntax(range, "f-string: empty expression not allowed"));
+            }
+            if has_conversion && !matches!(conversion, Some('r' | 's' | 'a')) {
+                return Err(ParseError::syntax(range, "f-string: invalid conversion character"));
+            }
             if !version.supports(PythonVersion::Py312) && has_unquoted_newline(expression_text) {
                 return Err(ParseError::syntax(
                     range,
@@ -3606,7 +3643,7 @@ fn normalize_fstring_expression(value: &str) -> String {
     output.trim().to_owned()
 }
 
-fn split_fstring_field(field: &str) -> (&str, Option<char>, Option<&str>, Option<&str>) {
+fn split_fstring_field(field: &str) -> (&str, Option<char>, Option<&str>, Option<&str>, bool) {
     let mut nesting = 0u32;
     let mut debug_at = None;
     let mut conversion_at = None;
@@ -3652,7 +3689,7 @@ fn split_fstring_field(field: &str) -> (&str, Option<char>, Option<&str>, Option
         let end = conversion_at.or(format_at).unwrap_or(field.len());
         &field[..end]
     });
-    (expression, conversion, format_spec, debug_prefix)
+    (expression, conversion, format_spec, debug_prefix, conversion_at.is_some())
 }
 
 trait FStringSuffix {

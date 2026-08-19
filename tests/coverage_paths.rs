@@ -36,7 +36,12 @@ fn pysyn_binary() -> PathBuf {
 
 #[test]
 fn exercises_stdlib_when_a_corpus_is_configured() {
-    let Some(root) = env::var_os("PYSYN_COVERAGE_STDLIB") else { return };
+    let Some(root) = env::var_os("PYSYN_COVERAGE_STDLIB") else {
+        eprintln!(
+            "coverage corpus not configured; set PYSYN_COVERAGE_STDLIB to exercise stdlib paths"
+        );
+        return;
+    };
     let root = PathBuf::from(root);
     assert!(root.is_dir(), "configured corpus is not a directory: {}", root.display());
 

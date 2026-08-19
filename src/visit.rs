@@ -405,6 +405,10 @@ fn collect_stmt<'tree>(statement: &'tree Stmt, nodes: &mut Vec<AnyNodeRef<'tree>
             self.0.push(AnyNodeRef::Stmt(node));
             walk_stmt(self, node);
         }
+        fn visit_pattern(&mut self, node: &'tree Pattern) {
+            self.0.push(AnyNodeRef::Pattern(node));
+            walk_pattern(self, node);
+        }
     }
     let mut collector = Collector(nodes);
     walk_stmt(&mut collector, statement);

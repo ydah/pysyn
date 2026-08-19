@@ -312,6 +312,30 @@ fn preserves_python_expression_precedence_and_literal_kinds() {
 }
 
 #[test]
+fn rejects_malformed_literals_and_f_string_fields() {
+    for source in [
+        "1e+\n",
+        "1e_1\n",
+        "0x\n",
+        "0b\n",
+        "0o\n",
+        "1._0\n",
+        "1j2\n",
+        "1__0\n",
+        "0x__ff\n",
+        "f\"{}\"\n",
+        "f\"{:}\"\n",
+        "f\"{!r}\"\n",
+        "f\"{value!}\"\n",
+        "f\"{value!q}\"\n",
+        "f\"{1__0}\"\n",
+        "1\\\n",
+    ] {
+        assert!(pysyn::parse_module(source).is_err(), "accepted invalid source: {source:?}");
+    }
+}
+
+#[test]
 fn records_annotation_simple_flag_and_extended_patterns() {
     let source = concat!(
         "value: int = 1\n",

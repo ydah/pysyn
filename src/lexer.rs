@@ -326,6 +326,7 @@ impl<'src> Scanner<'src> {
     }
 
     fn consume_line_continuation(&mut self) -> bool {
+        let start = self.position;
         let next = self.src.as_bytes().get(self.position + 1).copied();
         if next != Some(b'\n') && next != Some(b'\r') {
             return false;
@@ -333,6 +334,9 @@ impl<'src> Scanner<'src> {
         self.position += 2;
         if next == Some(b'\r') && self.src.as_bytes().get(self.position) == Some(&b'\n') {
             self.position += 1;
+        }
+        if self.position == self.src.len() {
+            self.error(start, self.position, "unexpected end of file after line continuation");
         }
         // A backslash continuation keeps the logical line (and its current
         // indentation) active across the physical newline.
@@ -383,12 +387,7 @@ impl<'src> Scanner<'src> {
                 self.position += 1;
             }
             let digits = &self.src[start + 2..self.position];
-            let valid = match base {
-                2 => digits.chars().all(|c| c == '_' || matches!(c, '0' | '1')),
-                8 => digits.chars().all(|c| c == '_' || ('0'..='7').contains(&c)),
-                _ => true,
-            };
-            if !valid {
+            if !valid_base_digits(digits, base) {
                 self.error(start, self.position, "invalid digit in numeric literal");
             }
         } else {
@@ -429,7 +428,7 @@ impl<'src> Scanner<'src> {
         } else {
             TokenKind::Int
         };
-        if text.ends_with('_') || text.contains("__") {
+        if base.is_none() && !valid_decimal_literal(text) {
             self.error(start, self.position, "invalid decimal literal");
         }
         if kind == TokenKind::Int
@@ -449,7 +448,7 @@ impl<'src> Scanner<'src> {
                 "leading zeros in decimal integer literals are not permitted",
             );
         }
-        if matches!(self.src.as_bytes().get(self.position), Some(byte) if byte.is_ascii_alphabetic() || *byte == b'_')
+        if matches!(self.src.as_bytes().get(self.position), Some(byte) if byte.is_ascii_alphanumeric() || *byte == b'_')
         {
             self.error(start, self.position + 1, "invalid decimal literal");
         }
@@ -704,6 +703,7 @@ impl<'src> Scanner<'src> {
 
     fn emit_fstring_expression(&mut self, start: usize, end: usize) {
         if start >= end {
+            self.error(start, end, "f-string: empty expression not allowed");
             return;
         }
         if let Some(colon) = fstring_format_colon(self.src, start, end) {
@@ -721,7 +721,33 @@ impl<'src> Scanner<'src> {
             expression,
             LexOptions { mode: LexMode::Full, version: self.options.version },
         ) {
-            let Ok(token) = item else { continue };
+            let Ok(token) = item else {
+                let error = item.expect_err("matched error above").diagnostic;
+                let shift = |range: TextRange| {
+                    TextRange::from_usize(
+                        start + range.start().as_usize(),
+                        start + range.end().as_usize(),
+                    )
+                };
+                self.items.push(Err(LexError {
+                    diagnostic: Diagnostic {
+                        code: error.code,
+                        severity: error.severity,
+                        message: error.message,
+                        range: shift(error.range),
+                        labels: error
+                            .labels
+                            .into_iter()
+                            .map(|label| crate::error::Label {
+                                range: shift(label.range),
+                                message: label.message,
+                            })
+                            .collect(),
+                        help: error.help,
+                    },
+                }));
+                continue;
+            };
             if matches!(token.kind, TokenKind::EndMarker | TokenKind::Indent | TokenKind::Dedent) {
                 continue;
             }
@@ -829,6 +855,108 @@ impl<'src> Scanner<'src> {
             ),
         }));
     }
+}
+
+fn valid_base_digits(digits: &str, base: u32) -> bool {
+    if digits.is_empty() {
+        return false;
+    }
+    let mut saw_digit = false;
+    let mut previous_was_digit = false;
+    for (index, character) in digits.chars().enumerate() {
+        if character == '_' {
+            if (!previous_was_digit && index != 0) || !digits[index + 1..].chars().next().is_some()
+            {
+                return false;
+            }
+            previous_was_digit = false;
+            continue;
+        }
+        if !is_base_digit(character, base) {
+            return false;
+        }
+        saw_digit = true;
+        previous_was_digit = true;
+    }
+    saw_digit && previous_was_digit
+}
+
+fn is_base_digit(character: char, base: u32) -> bool {
+    match base {
+        2 => matches!(character, '0' | '1'),
+        8 => matches!(character, '0'..='7'),
+        16 => character.is_ascii_hexdigit(),
+        _ => false,
+    }
+}
+
+fn valid_decimal_literal(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    let mut digit_count = 0;
+    let mut previous_was_digit = false;
+    while index < bytes.len() && (bytes[index].is_ascii_digit() || bytes[index] == b'_') {
+        if bytes[index] == b'_' {
+            if !previous_was_digit {
+                return false;
+            }
+            previous_was_digit = false;
+        } else {
+            digit_count += 1;
+            previous_was_digit = true;
+        }
+        index += 1;
+    }
+    if index > 0 && !previous_was_digit {
+        return false;
+    }
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        previous_was_digit = false;
+        while index < bytes.len() && (bytes[index].is_ascii_digit() || bytes[index] == b'_') {
+            if bytes[index] == b'_' {
+                if !previous_was_digit {
+                    return false;
+                }
+                previous_was_digit = false;
+            } else {
+                digit_count += 1;
+                previous_was_digit = true;
+            }
+            index += 1;
+        }
+        if !previous_was_digit && index > 0 && bytes[index - 1] == b'_' {
+            return false;
+        }
+    }
+    if matches!(bytes.get(index), Some(b'e' | b'E')) {
+        index += 1;
+        if matches!(bytes.get(index), Some(b'+' | b'-')) {
+            index += 1;
+        }
+        let exponent_start = index;
+        let mut exponent_digit = false;
+        let mut exponent_previous_digit = false;
+        while index < bytes.len() && (bytes[index].is_ascii_digit() || bytes[index] == b'_') {
+            if bytes[index] == b'_' {
+                if !exponent_previous_digit {
+                    return false;
+                }
+                exponent_previous_digit = false;
+            } else {
+                exponent_digit = true;
+                exponent_previous_digit = true;
+            }
+            index += 1;
+        }
+        if !exponent_digit || !exponent_previous_digit || exponent_start == index {
+            return false;
+        }
+    }
+    if matches!(bytes.get(index), Some(b'j' | b'J')) {
+        index += 1;
+    }
+    digit_count > 0 && index == bytes.len()
 }
 
 fn char_len_at(source: &str, position: usize) -> usize {

@@ -5,6 +5,7 @@ use std::fs;
 use std::io::{self, Read};
 
 struct InputSource {
+    name: Box<str>,
     text: String,
     encoding: Box<str>,
 }
@@ -16,6 +17,9 @@ fn main() {
         println!("pysyn {}", env!("CARGO_PKG_VERSION"));
         return;
     }
+    if !matches!(command.as_str(), "tokenize" | "parse" | "dump" | "unparse" | "check") {
+        print_usage_and_exit();
+    }
     let mut cpython_format = false;
     let mut dump_attributes = true;
     let mut input = None;
@@ -24,8 +28,14 @@ fn main() {
             cpython_format = true;
         } else if argument == "--no-attributes" {
             dump_attributes = false;
+        } else if argument.starts_with('-') && argument != "-" {
+            eprintln!("pysyn: unknown option: {argument}");
+            print_usage_and_exit();
         } else if input.is_none() {
             input = Some(argument);
+        } else {
+            eprintln!("pysyn: expected at most one input path, got an extra argument: {argument}");
+            print_usage_and_exit();
         }
     }
     let input_source = match read_source(input.as_deref()) {
@@ -35,7 +45,7 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let source = input_source.text;
+    let source = &input_source.text;
     match command.as_str() {
         "tokenize" => {
             let index = pysyn::LineIndex::new(&source);
@@ -56,14 +66,14 @@ fn main() {
                 println!("{}", pysyn::printer::dump(&module, options));
             }
             Err(error) => {
-                eprintln!("{}", error.diagnostic.display_with_source("<stdin>", &source));
+                eprintln!("{}", error.diagnostic.display_with_source(&input_source.name, source));
                 std::process::exit(1);
             }
         },
         "unparse" => match pysyn::parse_module(&source) {
             Ok(module) => print!("{}", pysyn::printer::unparse(&module)),
             Err(error) => {
-                eprintln!("{}", error.diagnostic.display_with_source("<stdin>", &source));
+                eprintln!("{}", error.diagnostic.display_with_source(&input_source.name, source));
                 std::process::exit(1);
             }
         },
@@ -71,23 +81,20 @@ fn main() {
             Ok(module) => {
                 let diagnostics =
                     pysyn::validate::validate(&module, pysyn::validate::ValidateLevel::Semantic);
-                if let Some(diagnostic) = diagnostics.into_iter().next() {
-                    eprintln!("{}", diagnostic.display_with_source("<stdin>", &source));
+                if !diagnostics.is_empty() {
+                    for diagnostic in diagnostics {
+                        eprintln!("{}", diagnostic.display_with_source(&input_source.name, source));
+                    }
                     std::process::exit(1);
                 }
                 println!("ok");
             }
             Err(error) => {
-                eprintln!("{}", error.diagnostic.display_with_source("<stdin>", &source));
+                eprintln!("{}", error.diagnostic.display_with_source(&input_source.name, source));
                 std::process::exit(1);
             }
         },
-        _ => {
-            eprintln!(
-                "usage: pysyn [parse|tokenize|dump|unparse|check] [--no-attributes] [file|-]"
-            );
-            std::process::exit(2);
-        }
+        _ => unreachable!("command was validated before reading input"),
     }
 }
 
@@ -160,7 +167,12 @@ fn read_source(input: Option<&str>) -> Result<InputSource, String> {
     };
     let encoding = pysyn::detected_encoding_name(&bytes).map_err(|error| error.to_string())?;
     let source = pysyn::SourceFile::from_bytes(name, &bytes).map_err(|error| error.to_string())?;
-    Ok(InputSource { text: source.text().to_owned(), encoding })
+    Ok(InputSource { name: source.name().into(), text: source.text().to_owned(), encoding })
+}
+
+fn print_usage_and_exit() -> ! {
+    eprintln!("usage: pysyn [parse|tokenize|dump|unparse|check] [--no-attributes] [file|-]");
+    std::process::exit(2);
 }
 
 fn print_cpython_tokens(source: &str, encoding: &str, index: &pysyn::LineIndex) {

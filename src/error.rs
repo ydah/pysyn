@@ -1,6 +1,6 @@
 //! Structured diagnostics and parse errors.
 
-use crate::source::{LineIndex, TextRange};
+use crate::source::{LineIndex, TextRange, TextSize};
 use std::fmt;
 
 /// Diagnostic severity.
@@ -33,6 +33,8 @@ pub enum DiagnosticCode {
     Encoding,
     /// Invalid string escape sequence.
     InvalidEscape,
+    /// Source text exceeds the representable byte-range limit.
+    SourceTooLarge,
 }
 
 impl DiagnosticCode {
@@ -47,6 +49,7 @@ impl DiagnosticCode {
             Self::TooDeep => "PSY0302",
             Self::Encoding => "PSY0102",
             Self::InvalidEscape => "PSY0103",
+            Self::SourceTooLarge => "PSY0104",
         }
     }
 }
@@ -124,15 +127,38 @@ impl Diagnostic {
     /// Renders the diagnostic with a source line and caret.
     pub fn display_with_source(&self, name: &str, source: &str) -> String {
         let index = LineIndex::new(source);
-        let location = index.line_col_utf8(source, self.range.start());
-        let line = source.lines().nth(location.line.saturating_sub(1) as usize).unwrap_or("");
-        let mut caret = " ".repeat(location.column as usize);
-        caret.push('^');
-        format!(
+        let location = index.line_col_chars(source, self.range.start());
+        let (line, caret) = render_marker(source, &index, self.range);
+        let mut output = format!(
             "  File \"{name}\", line {}\n    {line}\n    {caret}\n{}: {}",
             location.line, self.severity, self.message
-        )
+        );
+        for label in &self.labels {
+            let label_location = index.line_col_chars(source, label.range.start());
+            let (line, marker) = render_marker(source, &index, label.range);
+            output.push_str(&format!(
+                "\n  label, line {}\n    {line}\n    {marker}\nlabel: {}",
+                label_location.line, label.message
+            ));
+        }
+        if let Some(help) = &self.help {
+            output.push_str(&format!("\nhelp: {help}"));
+        }
+        output
     }
+}
+
+fn render_marker<'source>(
+    source: &'source str,
+    index: &LineIndex,
+    range: TextRange,
+) -> (&'source str, String) {
+    let start = index.line_col_chars(source, range.start());
+    let end = index.line_col_chars(source, range.end());
+    let line = source.lines().nth(start.line.saturating_sub(1) as usize).unwrap_or("");
+    let width =
+        if end.line == start.line { end.column.saturating_sub(start.column).max(1) } else { 1 };
+    (line, format!("{}{}", " ".repeat(start.column as usize), "^".repeat(width as usize)))
 }
 
 impl fmt::Display for Severity {
@@ -180,6 +206,16 @@ impl ParseError {
                 DiagnosticCode::TooDeep,
                 range,
                 "maximum parser node budget exceeded",
+            ),
+        }
+    }
+    /// Creates a source-size limit error.
+    pub fn source_too_large() -> Self {
+        Self {
+            diagnostic: Diagnostic::error(
+                DiagnosticCode::SourceTooLarge,
+                TextRange::empty(TextSize::new(u32::MAX)),
+                "source text exceeds the maximum supported size",
             ),
         }
     }

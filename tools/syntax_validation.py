@@ -56,26 +56,31 @@ def prompt_examples(source: str) -> list[str]:
 def cpython_error(command: str, source: str) -> tuple[int, int] | None:
     """Return CPython's syntax-error location, if compilation fails."""
 
+    probe = (
+        "import json, sys\n"
+        "try:\n"
+        "    compile(sys.stdin.read(), '<syntax>', 'exec')\n"
+        "except SyntaxError as error:\n"
+        "    print(json.dumps([error.lineno, None if error.offset is None else error.offset - 1]))\n"
+        "else:\n"
+        "    print('null')\n"
+    )
     completed = subprocess.run(
-        [command, "-c", "import sys; compile(sys.stdin.read(), '<syntax>', 'exec')"],
+        [command, "-c", probe],
         input=source,
         text=True,
         capture_output=True,
         check=False,
     )
-    if completed.returncode == 0:
+    if completed.returncode != 0:
         return None
-    match = re.search(r"line (\d+)", completed.stderr)
-    if not match:
-        return None
-    error = SyntaxError()
     try:
-        compile(source, "<syntax>", "exec")
-    except SyntaxError as caught:
-        error = caught
-    if error.lineno is None or error.offset is None:
+        location = json.loads(completed.stdout.strip())
+    except json.JSONDecodeError:
         return None
-    return error.lineno, error.offset - 1
+    if location is None or location[0] is None or location[1] is None:
+        return None
+    return int(location[0]), int(location[1])
 
 
 def pysyn_location(stderr: str) -> tuple[int, int] | None:
