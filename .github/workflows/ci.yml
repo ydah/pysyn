@@ -73,6 +73,7 @@ jobs:
         with:
           toolchain: stable
       - run: cargo build --quiet --all-features --bin pysyn
+      - run: python tools/test_differential_ast.py
       - name: Locate CPython standard library corpus
         run: echo "PYTHON_STDLIB=$(python -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')" >> "$GITHUB_ENV"
       - name: Run token, AST, and round-trip comparisons with f-strings

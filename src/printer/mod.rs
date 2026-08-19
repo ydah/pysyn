@@ -750,7 +750,13 @@ fn dump_pattern(pattern: &Pattern, options: &DumpOptions, level: usize, output: 
         }
         Pattern::Singleton(node) => {
             output.push_str("MatchSingleton(value=");
-            dump_expr(&node.value, options, level, output);
+            match &node.value {
+                Expr::BooleanLiteral(value) => {
+                    output.push_str(if value.value { "True" } else { "False" })
+                }
+                Expr::NoneLiteral(_) => output.push_str("None"),
+                value => dump_expr(value, options, level, output),
+            }
             finish_node(node.range, options, output);
         }
         Pattern::Value(node) => {
@@ -2016,7 +2022,13 @@ impl Unparser {
                         }
                         other => format!(":{}", self.expression(other)),
                     });
-                    format!("{{{}{conversion}{spec}}}", self.expression(&node.value))
+                    let expression = self.expression(&node.value);
+                    let expression = if expression.starts_with('{') {
+                        format!("({expression})")
+                    } else {
+                        expression
+                    };
+                    format!("{{{}{conversion}{spec}}}", expression)
                 }
                 _ => fstring_literal(&self.expression(value), quote),
             })

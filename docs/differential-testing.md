@@ -36,6 +36,8 @@ This keeps the CI binary aligned with the feature-complete test build and
 prevents f-string token or AST-location coverage from being silently skipped.
 The harness passes the matching `--target-version` to every CLI invocation;
 without that option a CLI invocation intentionally defaults to Python 3.13.
+Syntax accepted by the host CPython but newer than the selected target is
+reported as `UnsupportedSyntax` by CLI parse/check commands.
 
 Compare a local corpus without copying it into the repository:
 

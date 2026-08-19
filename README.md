@@ -39,3 +39,5 @@ cargo run -- check example.py
 The CLI targets Python 3.13 by default. Use `--target-version=3.8` through
 `--target-version=3.13` when tokenizing or parsing code for an older grammar;
 this also selects the pre-3.12 legacy f-string token and location model.
+When source uses syntax newer than the selected target, CLI parse/check
+commands report `UnsupportedSyntax` and exit non-zero.

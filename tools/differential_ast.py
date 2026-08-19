@@ -102,10 +102,7 @@ def normalize_fields(fields: dict[str, Any], node_type: str = "") -> dict[str, A
     return {
         name: value
         for name, value in fields.items()
-        if value not in (None, [], "")
-        and not (name == "value" and node_type != "Constant")
-        or (name in {"id", "name", "arg", "module", "attr"} and value is not None)
-        or (name == "value" and node_type == "Constant")
+        if (name == "value" and node_type == "Constant") or value not in (None, [], "")
     }
 
 
