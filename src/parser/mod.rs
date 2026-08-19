@@ -3748,6 +3748,12 @@ fn normalize_fstring_expression(value: &str) -> String {
                     cursor += 1;
                 }
             }
+            b'\\' if matches!(bytes.get(cursor + 1), Some(b'\n' | b'\r')) => {
+                cursor += 2;
+                if bytes.get(cursor - 1) == Some(&b'\r') && bytes.get(cursor) == Some(&b'\n') {
+                    cursor += 1;
+                }
+            }
             _ => {
                 let character = value[cursor..].chars().next().unwrap_or_default();
                 output.push(character);

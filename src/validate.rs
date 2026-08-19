@@ -550,16 +550,7 @@ impl Validator {
                         }
                         walk_expr(self, expr);
                     }
-                    Expr::GeneratorExp(node) => {
-                        if node.generators.iter().any(|generator| generator.is_async)
-                            && self.validator.level == ValidateLevel::Semantic
-                            && !self.validator.current_scope_kind().is_async_function()
-                        {
-                            self.validator.error(
-                                node.range,
-                                "asynchronous comprehension outside async function",
-                            );
-                        }
+                    Expr::GeneratorExp(_) => {
                         self.generator_depth += 1;
                         walk_expr(self, expr);
                         self.generator_depth = self.generator_depth.saturating_sub(1);

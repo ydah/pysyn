@@ -427,6 +427,12 @@ fn accepts_pep701_fstring_forms_and_unicode_names() {
 }
 
 #[test]
+fn accepts_fstring_format_spec_string_continuations() {
+    let source = concat!("value = f\"\"\"{formatter():{'a'\\\n", "'b'}}}\"\"\"\n",);
+    assert!(pysyn::parse_module(source).is_ok());
+}
+
+#[test]
 fn recovers_non_ascii_fstring_fields_without_panicking() {
     let parsed = parse(
         "F'😀{value}'\n",
