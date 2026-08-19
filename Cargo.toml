@@ -6,6 +6,10 @@ rust-version = "1.75"
 description = "A standalone Rust parser for Python source code"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
+documentation = "https://docs.rs/pysyn"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 default = ["std", "nfkc"]
