@@ -865,8 +865,7 @@ fn valid_base_digits(digits: &str, base: u32) -> bool {
     let mut previous_was_digit = false;
     for (index, character) in digits.chars().enumerate() {
         if character == '_' {
-            if (!previous_was_digit && index != 0) || !digits[index + 1..].chars().next().is_some()
-            {
+            if (!previous_was_digit && index != 0) || digits[index + 1..].chars().next().is_none() {
                 return false;
             }
             previous_was_digit = false;

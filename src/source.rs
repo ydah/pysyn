@@ -97,7 +97,14 @@ impl TextRange {
     }
     /// Creates a range from platform-sized byte offsets.
     pub fn from_usize(start: usize, end: usize) -> Self {
-        Self::new(TextSize::new(start as u32), TextSize::new(end as u32))
+        Self::new(TextSize::new(clamp_offset(start)), TextSize::new(clamp_offset(end)))
+    }
+    /// Creates a range only when both offsets fit the compact representation.
+    pub fn try_from_usize(start: usize, end: usize) -> Option<Self> {
+        Some(Self::new(
+            TextSize::new(u32::try_from(start).ok()?),
+            TextSize::new(u32::try_from(end).ok()?),
+        ))
     }
     /// Creates an empty range at an offset.
     pub const fn empty(offset: TextSize) -> Self {
@@ -165,11 +172,11 @@ impl LineIndex {
         let mut index = 0;
         while index < bytes.len() {
             match bytes[index] {
-                b'\n' => starts.push(TextSize::new((index + 1) as u32)),
+                b'\n' => starts.push(TextSize::new(clamp_offset(index + 1))),
                 b'\r' => {
                     let next =
                         if bytes.get(index + 1) == Some(&b'\n') { index + 2 } else { index + 1 };
-                    starts.push(TextSize::new(next as u32));
+                    starts.push(TextSize::new(clamp_offset(next)));
                     index = next;
                     continue;
                 }
@@ -198,14 +205,14 @@ impl LineIndex {
     /// Converts an offset to CPython-compatible UTF-8 byte columns.
     pub fn line_col_utf8(&self, src: &str, offset: TextSize) -> LineCol {
         let offset = offset.as_usize().min(src.len());
-        let (line, start) = self.line_start(TextSize::new(offset as u32));
+        let (line, start) = self.line_start(TextSize::new(clamp_offset(offset)));
         LineCol { line: line as u32 + 1, column: (offset - start.as_usize()) as u32 }
     }
 
     /// Converts an offset to UTF-16 code-unit columns.
     pub fn line_col_utf16(&self, src: &str, offset: TextSize) -> LineCol {
         let offset = clamp_to_char_boundary(src, offset);
-        let (line, start) = self.line_start(TextSize::new(offset as u32));
+        let (line, start) = self.line_start(TextSize::new(clamp_offset(offset)));
         LineCol {
             line: line as u32 + 1,
             column: src[start.as_usize()..offset].encode_utf16().count() as u32,
@@ -215,7 +222,7 @@ impl LineIndex {
     /// Converts an offset to Unicode scalar-value columns.
     pub fn line_col_chars(&self, src: &str, offset: TextSize) -> LineCol {
         let offset = clamp_to_char_boundary(src, offset);
-        let (line, start) = self.line_start(TextSize::new(offset as u32));
+        let (line, start) = self.line_start(TextSize::new(clamp_offset(offset)));
         LineCol {
             line: line as u32 + 1,
             column: src[start.as_usize()..offset].chars().count() as u32,
@@ -229,6 +236,10 @@ fn clamp_to_char_boundary(src: &str, offset: TextSize) -> usize {
         offset -= 1;
     }
     offset
+}
+
+fn clamp_offset(offset: usize) -> u32 {
+    offset.min(u32::MAX as usize) as u32
 }
 
 /// A named source file and its line index.
@@ -493,6 +504,14 @@ mod tests {
 
         assert_eq!(index.line_col_utf16(src, offset_inside_e), LineCol { line: 1, column: 2 });
         assert_eq!(index.line_col_chars(src, offset_inside_e), LineCol { line: 1, column: 1 });
+    }
+
+    #[test]
+    fn checked_ranges_reject_offsets_that_do_not_fit() {
+        assert!(TextRange::try_from_usize(u32::MAX as usize, u32::MAX as usize).is_some());
+        let oversized = (u32::MAX as usize).saturating_add(1);
+        assert!(TextRange::try_from_usize(oversized, 0).is_none());
+        assert_eq!(TextRange::from_usize(oversized, 0).start().raw(), u32::MAX);
     }
 
     #[test]

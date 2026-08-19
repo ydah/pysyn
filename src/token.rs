@@ -70,6 +70,9 @@ impl StringPrefix {
         if result.0 & Self::BYTES.0 != 0 && result.0 & (Self::FORMAT.0 | Self::UNICODE.0) != 0 {
             return None;
         }
+        if result.0 & Self::UNICODE.0 != 0 && result.0 & (Self::RAW.0 | Self::FORMAT.0) != 0 {
+            return None;
+        }
         Some(result)
     }
     /// Tests the raw-string flag.
@@ -111,106 +114,218 @@ impl Token {
 }
 
 /// Token categories emitted by the lexer.
-#[allow(missing_docs)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TokenKind {
+    /// Token category.
     Newline,
+    /// Token category.
     NonLogicalNewline,
+    /// Token category.
     Indent,
+    /// Token category.
     Dedent,
+    /// Token category.
     EndMarker,
+    /// Token category.
     Comment,
+    /// Token category.
     Name,
+    /// Token category.
     Int,
+    /// Token category.
     Float,
+    /// Token category.
     Complex,
-    String { prefix: StringPrefix, triple: bool },
-    FStringStart { prefix: StringPrefix, triple: bool },
+    /// Token category.
+    String {
+        /// String prefix flags.
+        prefix: StringPrefix,
+        /// Whether the delimiter is triple-quoted.
+        triple: bool,
+    },
+    /// Token category.
+    FStringStart {
+        /// String prefix flags.
+        prefix: StringPrefix,
+        /// Whether the delimiter is triple-quoted.
+        triple: bool,
+    },
+    /// Token category.
     FStringMiddle,
-    FStringEnd { prefix: StringPrefix, triple: bool },
+    /// Token category.
+    FStringEnd {
+        /// String prefix flags.
+        prefix: StringPrefix,
+        /// Whether the delimiter is triple-quoted.
+        triple: bool,
+    },
+    /// Token category.
     False,
+    /// Token category.
     None,
+    /// Token category.
     True,
+    /// Token category.
     And,
+    /// Token category.
     As,
+    /// Token category.
     Assert,
+    /// Token category.
     Async,
+    /// Token category.
     Await,
+    /// Token category.
     Break,
+    /// Token category.
     Class,
+    /// Token category.
     Continue,
+    /// Token category.
     Def,
+    /// Token category.
     Del,
+    /// Token category.
     Elif,
+    /// Token category.
     Else,
+    /// Token category.
     Except,
+    /// Token category.
     Finally,
+    /// Token category.
     For,
+    /// Token category.
     From,
+    /// Token category.
     Global,
+    /// Token category.
     If,
+    /// Token category.
     Import,
+    /// Token category.
     In,
+    /// Token category.
     Is,
+    /// Token category.
     Lambda,
+    /// Token category.
     Nonlocal,
+    /// Token category.
     Not,
+    /// Token category.
     Or,
+    /// Token category.
     Pass,
+    /// Token category.
     Raise,
+    /// Token category.
     Return,
+    /// Token category.
     Try,
+    /// Token category.
     While,
+    /// Token category.
     With,
+    /// Token category.
     Yield,
+    /// Token category.
     Plus,
+    /// Token category.
     Minus,
+    /// Token category.
     Star,
+    /// Token category.
     DoubleStar,
+    /// Token category.
     Slash,
+    /// Token category.
     DoubleSlash,
+    /// Token category.
     Percent,
+    /// Token category.
     At,
+    /// Token category.
     LeftShift,
+    /// Token category.
     RightShift,
+    /// Token category.
     Ampersand,
+    /// Token category.
     Vbar,
+    /// Token category.
     CircumFlex,
+    /// Token category.
     Tilde,
+    /// Token category.
     Less,
+    /// Token category.
     Greater,
+    /// Token category.
     LessEqual,
+    /// Token category.
     GreaterEqual,
+    /// Token category.
     EqEqual,
+    /// Token category.
     NotEqual,
+    /// Token category.
     LPar,
+    /// Token category.
     RPar,
+    /// Token category.
     LSqb,
+    /// Token category.
     RSqb,
+    /// Token category.
     LBrace,
+    /// Token category.
     RBrace,
+    /// Token category.
     Comma,
+    /// Token category.
     Colon,
+    /// Token category.
     Dot,
+    /// Token category.
     Semi,
+    /// Token category.
     Equal,
+    /// Token category.
     Arrow,
+    /// Token category.
     ColonEqual,
+    /// Token category.
     Ellipsis,
+    /// Token category.
     PlusEqual,
+    /// Token category.
     MinusEqual,
+    /// Token category.
     StarEqual,
+    /// Token category.
     SlashEqual,
+    /// Token category.
     DoubleSlashEqual,
+    /// Token category.
     PercentEqual,
+    /// Token category.
     AtEqual,
+    /// Token category.
     AmperEqual,
+    /// Token category.
     VbarEqual,
+    /// Token category.
     CircumflexEqual,
+    /// Token category.
     LeftShiftEqual,
+    /// Token category.
     RightShiftEqual,
+    /// Token category.
     DoubleStarEqual,
+    /// Token category.
     Exclamation,
+    /// Token category.
     Unknown,
 }
 

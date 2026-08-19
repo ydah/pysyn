@@ -1,7 +1,7 @@
 //! Post-parse syntax and semantic validation.
 
-#![allow(missing_docs)]
-
+//! Validation is deliberately separate from parsing so recovered trees can
+//! still be inspected and reported by tooling.
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Expr, ExprContext, ModModule, Parameter, Parameters, Pattern, Stmt, TypeParam};
@@ -10,11 +10,15 @@ use crate::source::TextRange;
 use crate::visit::{walk_expr, Visitor};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+/// Public API item.
 pub enum ValidateLevel {
+    /// AST variant.
     Syntax,
+    /// AST variant.
     Semantic,
 }
 
+/// Performs this public operation.
 pub fn validate(module: &ModModule, level: ValidateLevel) -> Vec<Diagnostic> {
     let mut validator = Validator::new(level);
     let bindings = collect_block_bindings(&module.body);
@@ -97,6 +101,9 @@ impl Validator {
     }
 
     fn record_binding(&mut self, name: &str, range: TextRange) {
+        if self.level == ValidateLevel::Semantic && name == "__debug__" {
+            self.error(range, "cannot assign to __debug__");
+        }
         let Some(scope) = self.scopes.last_mut() else { return };
         if scope.globals.contains(name) || scope.nonlocals.contains(name) {
             return;
@@ -388,16 +395,14 @@ impl Validator {
                 .defaults
                 .get(index.saturating_sub(default_start))
                 .filter(|_| index >= default_start);
-            let has_default = parameter.default.is_some() || aggregate.is_some();
+            let has_default = aggregate.is_some();
             if has_default {
                 saw_default = true;
             } else if saw_default {
                 self.error(parameter.range, "non-default argument follows default argument");
             }
-            if parameter.default.is_none() {
-                if let Some(default) = aggregate {
-                    self.validate_expr(default);
-                }
+            if let Some(default) = aggregate {
+                self.validate_expr(default);
             }
         }
         if parameters.defaults.len() > positional.len() {
@@ -415,16 +420,10 @@ impl Validator {
         if let Some(parameter) = &parameters.vararg {
             self.validate_parameter(parameter, None);
             self.check_parameter_name(parameter, &mut names);
-            if parameter.default.is_some() {
-                self.error(parameter.range, "var-positional argument cannot have a default");
-            }
         }
         if let Some(parameter) = &parameters.kwarg {
             self.validate_parameter(parameter, None);
             self.check_parameter_name(parameter, &mut names);
-            if parameter.default.is_some() {
-                self.error(parameter.range, "var-keyword argument cannot have a default");
-            }
         }
     }
 
@@ -432,9 +431,7 @@ impl Validator {
         if let Some(annotation) = &parameter.annotation {
             self.validate_expr(annotation);
         }
-        if let Some(default) = &parameter.default {
-            self.validate_expr(default);
-        } else if let Some(default) = fallback_default {
+        if let Some(default) = fallback_default {
             self.validate_expr(default);
         }
     }
@@ -878,7 +875,6 @@ fn collect_parameters_bindings(parameters: &Parameters, bindings: &mut HashSet<S
         .chain(parameters.kwarg.iter())
     {
         collect_optional_expr_bindings(parameter.annotation.as_deref(), bindings);
-        collect_optional_expr_bindings(parameter.default.as_deref(), bindings);
     }
     for default in &parameters.defaults {
         collect_expr_bindings(default, bindings);

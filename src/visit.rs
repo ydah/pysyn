@@ -1,21 +1,26 @@
 //! AST visitor and non-recursive traversal support.
 
-#![allow(missing_docs)]
+//! [`Visitor`] is read-only and recursive by default; [`preorder`] adds a
+//! type-erased event stream suitable for indexing every node kind.
+use crate::ast::*;
 
-use crate::ast::{AnyNodeRef, Expr, ModModule, Parameters, Pattern, Ranged, Stmt, TypeParam};
-
+/// Public API item.
 pub trait Visitor<'a> {
+    /// Visits or transforms the node.
     fn visit_stmt(&mut self, node: &'a Stmt) {
         walk_stmt(self, node);
     }
+    /// Visits or transforms the node.
     fn visit_expr(&mut self, node: &'a Expr) {
         walk_expr(self, node);
     }
+    /// Visits or transforms the node.
     fn visit_pattern(&mut self, node: &'a Pattern) {
         walk_pattern(self, node);
     }
 }
 
+/// Performs this public operation.
 pub fn walk_stmt<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, node: &'a Stmt) {
     match node {
         Stmt::Expr(stmt) => visitor.visit_expr(&stmt.value),
@@ -191,15 +196,8 @@ fn walk_parameters<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, parameters: &'a
         walk_parameter(visitor, parameter, None);
     }
 
-    let has_positional_defaults = parameters
-        .posonlyargs
-        .iter()
-        .chain(&parameters.args)
-        .any(|parameter| parameter.default.is_some());
-    if !has_positional_defaults {
-        for default in &parameters.defaults {
-            visitor.visit_expr(default);
-        }
+    for default in &parameters.defaults {
+        visitor.visit_expr(default);
     }
 }
 
@@ -211,9 +209,7 @@ fn walk_parameter<'a, V: Visitor<'a> + ?Sized>(
     if let Some(annotation) = &parameter.annotation {
         visitor.visit_expr(annotation);
     }
-    if let Some(default) = &parameter.default {
-        visitor.visit_expr(default);
-    } else if let Some(default) = fallback_default {
+    if let Some(default) = fallback_default {
         visitor.visit_expr(default);
     }
 }
@@ -234,6 +230,7 @@ fn walk_type_params<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, type_params: &
     }
 }
 
+/// Performs this public operation.
 pub fn walk_pattern<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, node: &'a Pattern) {
     match node {
         Pattern::Value(node) => visitor.visit_expr(&node.value),
@@ -274,6 +271,7 @@ pub fn walk_pattern<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, node: &'a Patt
     }
 }
 
+/// Performs this public operation.
 pub fn walk_expr<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, node: &'a Expr) {
     match node {
         Expr::BoolOp(node) => {
@@ -385,6 +383,7 @@ pub fn walk_expr<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, node: &'a Expr) {
     }
 }
 
+/// Performs this public operation.
 pub fn preorder(module: &ModModule) -> impl Iterator<Item = AnyNodeRef<'_>> {
     let mut nodes = Vec::new();
     for statement in &module.body {
@@ -414,10 +413,490 @@ fn collect_stmt<'tree>(statement: &'tree Stmt, nodes: &mut Vec<AnyNodeRef<'tree>
     walk_stmt(&mut collector, statement);
 }
 
+/// Owns an AST transformation callback.
+///
+/// The default callbacks preserve their input. Use the transformation
+/// functions in this module to get a post-order traversal; each child is
+/// transformed before its parent callback.
 pub trait Transformer {
+    /// Replaces or preserves an expression after its children were transformed.
     fn transform_expr(&mut self, node: Expr) -> Expr {
         node
     }
+    /// Replaces or preserves a statement after its children were transformed.
+    fn transform_stmt(&mut self, node: Stmt) -> Stmt {
+        node
+    }
+    /// Replaces or preserves a pattern after its children were transformed.
+    fn transform_pattern(&mut self, node: Pattern) -> Pattern {
+        node
+    }
+}
+
+/// Transforms every statement in an owned module in source order.
+pub fn transform_module<T: Transformer>(transformer: &mut T, mut module: ModModule) -> ModModule {
+    module.body =
+        module.body.into_iter().map(|statement| transform_stmt(transformer, statement)).collect();
+    module
+}
+
+/// Transforms one owned statement and all of its descendants.
+pub fn transform_stmt<T: Transformer>(transformer: &mut T, statement: Stmt) -> Stmt {
+    let statement = match statement {
+        Stmt::FunctionDef(mut node) => {
+            node.decorator_list = transform_expressions(transformer, node.decorator_list);
+            node.type_params = transform_type_params(transformer, node.type_params);
+            node.args = transform_parameters(transformer, node.args);
+            node.returns = node.returns.map(|expr| Box::new(transform_expr(transformer, *expr)));
+            node.body = transform_statements(transformer, node.body);
+            Stmt::FunctionDef(node)
+        }
+        Stmt::AsyncFunctionDef(mut node) => {
+            node.decorator_list = transform_expressions(transformer, node.decorator_list);
+            node.type_params = transform_type_params(transformer, node.type_params);
+            node.args = transform_parameters(transformer, node.args);
+            node.returns = node.returns.map(|expr| Box::new(transform_expr(transformer, *expr)));
+            node.body = transform_statements(transformer, node.body);
+            Stmt::AsyncFunctionDef(node)
+        }
+        Stmt::ClassDef(mut node) => {
+            node.bases = transform_expressions(transformer, node.bases);
+            node.keywords = node
+                .keywords
+                .into_iter()
+                .map(|keyword| transform_keyword(transformer, keyword))
+                .collect();
+            node.decorator_list = transform_expressions(transformer, node.decorator_list);
+            node.type_params = transform_type_params(transformer, node.type_params);
+            node.body = transform_statements(transformer, node.body);
+            Stmt::ClassDef(node)
+        }
+        Stmt::Return(mut node) => {
+            node.value = node.value.map(|expr| Box::new(transform_expr(transformer, *expr)));
+            Stmt::Return(node)
+        }
+        Stmt::Delete(mut node) => {
+            node.targets = transform_expressions(transformer, node.targets);
+            Stmt::Delete(node)
+        }
+        Stmt::Assign(mut node) => {
+            node.targets = transform_expressions(transformer, node.targets);
+            node.value = Box::new(transform_expr(transformer, *node.value));
+            Stmt::Assign(node)
+        }
+        Stmt::TypeAlias(mut node) => {
+            node.name = Box::new(transform_expr(transformer, *node.name));
+            node.type_params = transform_type_params(transformer, node.type_params);
+            node.value = Box::new(transform_expr(transformer, *node.value));
+            Stmt::TypeAlias(node)
+        }
+        Stmt::AugAssign(mut node) => {
+            node.target = Box::new(transform_expr(transformer, *node.target));
+            node.value = Box::new(transform_expr(transformer, *node.value));
+            Stmt::AugAssign(node)
+        }
+        Stmt::AnnAssign(mut node) => {
+            node.target = Box::new(transform_expr(transformer, *node.target));
+            node.annotation = Box::new(transform_expr(transformer, *node.annotation));
+            node.value = node.value.map(|expr| Box::new(transform_expr(transformer, *expr)));
+            Stmt::AnnAssign(node)
+        }
+        Stmt::For(mut node) => {
+            node.target = Box::new(transform_expr(transformer, *node.target));
+            node.iter = Box::new(transform_expr(transformer, *node.iter));
+            node.body = transform_statements(transformer, node.body);
+            node.orelse = transform_statements(transformer, node.orelse);
+            Stmt::For(node)
+        }
+        Stmt::AsyncFor(mut node) => {
+            node.target = Box::new(transform_expr(transformer, *node.target));
+            node.iter = Box::new(transform_expr(transformer, *node.iter));
+            node.body = transform_statements(transformer, node.body);
+            node.orelse = transform_statements(transformer, node.orelse);
+            Stmt::AsyncFor(node)
+        }
+        Stmt::While(mut node) => {
+            node.test = Box::new(transform_expr(transformer, *node.test));
+            node.body = transform_statements(transformer, node.body);
+            node.orelse = transform_statements(transformer, node.orelse);
+            Stmt::While(node)
+        }
+        Stmt::If(mut node) => {
+            node.test = Box::new(transform_expr(transformer, *node.test));
+            node.body = transform_statements(transformer, node.body);
+            node.orelse = transform_statements(transformer, node.orelse);
+            Stmt::If(node)
+        }
+        Stmt::With(mut node) => {
+            node.items =
+                node.items.into_iter().map(|item| transform_with_item(transformer, item)).collect();
+            node.body = transform_statements(transformer, node.body);
+            Stmt::With(node)
+        }
+        Stmt::AsyncWith(mut node) => {
+            node.items =
+                node.items.into_iter().map(|item| transform_with_item(transformer, item)).collect();
+            node.body = transform_statements(transformer, node.body);
+            Stmt::AsyncWith(node)
+        }
+        Stmt::Match(mut node) => {
+            node.subject = Box::new(transform_expr(transformer, *node.subject));
+            node.cases = node
+                .cases
+                .into_iter()
+                .map(|case| {
+                    let MatchCase { range, pattern, guard, body } = case;
+                    MatchCase {
+                        range,
+                        pattern: transform_pattern(transformer, pattern),
+                        guard: guard.map(|expr| transform_expr(transformer, expr)),
+                        body: transform_statements(transformer, body),
+                    }
+                })
+                .collect();
+            Stmt::Match(node)
+        }
+        Stmt::Raise(mut node) => {
+            node.exc = node.exc.map(|expr| Box::new(transform_expr(transformer, *expr)));
+            node.cause = node.cause.map(|expr| Box::new(transform_expr(transformer, *expr)));
+            Stmt::Raise(node)
+        }
+        Stmt::Try(mut node) => {
+            node.body = transform_statements(transformer, node.body);
+            node.handlers = node
+                .handlers
+                .into_iter()
+                .map(|handler| transform_except_handler(transformer, handler))
+                .collect();
+            node.orelse = transform_statements(transformer, node.orelse);
+            node.finalbody = transform_statements(transformer, node.finalbody);
+            Stmt::Try(node)
+        }
+        Stmt::TryStar(mut node) => {
+            node.body = transform_statements(transformer, node.body);
+            node.handlers = node
+                .handlers
+                .into_iter()
+                .map(|handler| transform_except_handler(transformer, handler))
+                .collect();
+            node.orelse = transform_statements(transformer, node.orelse);
+            node.finalbody = transform_statements(transformer, node.finalbody);
+            Stmt::TryStar(node)
+        }
+        Stmt::Assert(mut node) => {
+            node.test = Box::new(transform_expr(transformer, *node.test));
+            node.msg = node.msg.map(|expr| Box::new(transform_expr(transformer, *expr)));
+            Stmt::Assert(node)
+        }
+        Stmt::Expr(mut node) => {
+            node.value = Box::new(transform_expr(transformer, *node.value));
+            Stmt::Expr(node)
+        }
+        other => other,
+    };
+    transformer.transform_stmt(statement)
+}
+
+fn transform_statements<T: Transformer>(transformer: &mut T, body: Vec<Stmt>) -> Vec<Stmt> {
+    body.into_iter().map(|statement| transform_stmt(transformer, statement)).collect()
+}
+
+/// Transforms one owned expression and all of its descendants.
+pub fn transform_expr<T: Transformer>(transformer: &mut T, expression: Expr) -> Expr {
+    let expression = match expression {
+        Expr::BoolOp(mut node) => {
+            node.values = transform_expressions(transformer, node.values);
+            Expr::BoolOp(node)
+        }
+        Expr::NamedExpr(mut node) => {
+            node.target = Box::new(transform_expr(transformer, *node.target));
+            node.value = Box::new(transform_expr(transformer, *node.value));
+            Expr::NamedExpr(node)
+        }
+        Expr::BinOp(mut node) => {
+            node.left = Box::new(transform_expr(transformer, *node.left));
+            node.right = Box::new(transform_expr(transformer, *node.right));
+            Expr::BinOp(node)
+        }
+        Expr::UnaryOp(mut node) => {
+            node.operand = Box::new(transform_expr(transformer, *node.operand));
+            Expr::UnaryOp(node)
+        }
+        Expr::Lambda(mut node) => {
+            node.args = transform_parameters(transformer, node.args);
+            node.body = Box::new(transform_expr(transformer, *node.body));
+            Expr::Lambda(node)
+        }
+        Expr::IfExp(mut node) => {
+            node.body = Box::new(transform_expr(transformer, *node.body));
+            node.test = Box::new(transform_expr(transformer, *node.test));
+            node.orelse = Box::new(transform_expr(transformer, *node.orelse));
+            Expr::IfExp(node)
+        }
+        Expr::Dict(mut node) => {
+            node.keys = node
+                .keys
+                .into_iter()
+                .map(|expr| expr.map(|expr| transform_expr(transformer, expr)))
+                .collect();
+            node.values = transform_expressions(transformer, node.values);
+            Expr::Dict(node)
+        }
+        Expr::Set(mut node) => {
+            node.elts = transform_expressions(transformer, node.elts);
+            Expr::Set(node)
+        }
+        Expr::ListComp(mut node) => {
+            node = transform_comprehension(transformer, node);
+            Expr::ListComp(node)
+        }
+        Expr::SetComp(mut node) => {
+            node = transform_comprehension(transformer, node);
+            Expr::SetComp(node)
+        }
+        Expr::DictComp(mut node) => {
+            node = transform_comprehension(transformer, node);
+            Expr::DictComp(node)
+        }
+        Expr::GeneratorExp(mut node) => {
+            node = transform_comprehension(transformer, node);
+            Expr::GeneratorExp(node)
+        }
+        Expr::Await(mut node) => {
+            node.value = node.value.map(|expr| Box::new(transform_expr(transformer, *expr)));
+            Expr::Await(node)
+        }
+        Expr::Yield(mut node) => {
+            node.value = node.value.map(|expr| Box::new(transform_expr(transformer, *expr)));
+            Expr::Yield(node)
+        }
+        Expr::YieldFrom(mut node) => {
+            node.value = node.value.map(|expr| Box::new(transform_expr(transformer, *expr)));
+            Expr::YieldFrom(node)
+        }
+        Expr::Compare(mut node) => {
+            node.left = Box::new(transform_expr(transformer, *node.left));
+            node.comparators = transform_expressions(transformer, node.comparators);
+            Expr::Compare(node)
+        }
+        Expr::Call(mut node) => {
+            node.func = Box::new(transform_expr(transformer, *node.func));
+            node.args = transform_expressions(transformer, node.args);
+            node.keywords = node
+                .keywords
+                .into_iter()
+                .map(|keyword| transform_keyword(transformer, keyword))
+                .collect();
+            Expr::Call(node)
+        }
+        Expr::FString(mut node) => {
+            node.values = transform_expressions(transformer, node.values);
+            Expr::FString(node)
+        }
+        Expr::FormattedValue(mut node) => {
+            node.value = Box::new(transform_expr(transformer, *node.value));
+            node.format_spec =
+                node.format_spec.map(|expr| Box::new(transform_expr(transformer, *expr)));
+            Expr::FormattedValue(node)
+        }
+        Expr::Attribute(mut node) => {
+            node.value = Box::new(transform_expr(transformer, *node.value));
+            Expr::Attribute(node)
+        }
+        Expr::Subscript(mut node) => {
+            node.value = Box::new(transform_expr(transformer, *node.value));
+            node.slice = Box::new(transform_expr(transformer, *node.slice));
+            Expr::Subscript(node)
+        }
+        Expr::Starred(mut node) => {
+            node.value = Box::new(transform_expr(transformer, *node.value));
+            Expr::Starred(node)
+        }
+        Expr::List(mut node) => {
+            node.elts = transform_expressions(transformer, node.elts);
+            Expr::List(node)
+        }
+        Expr::Tuple(mut node) => {
+            node.elts = transform_expressions(transformer, node.elts);
+            Expr::Tuple(node)
+        }
+        Expr::Slice(mut node) => {
+            node.lower = node.lower.map(|expr| Box::new(transform_expr(transformer, *expr)));
+            node.upper = node.upper.map(|expr| Box::new(transform_expr(transformer, *expr)));
+            node.step = node.step.map(|expr| Box::new(transform_expr(transformer, *expr)));
+            Expr::Slice(node)
+        }
+        leaf => leaf,
+    };
+    transformer.transform_expr(expression)
+}
+
+fn transform_expressions<T: Transformer>(transformer: &mut T, values: Vec<Expr>) -> Vec<Expr> {
+    values.into_iter().map(|expr| transform_expr(transformer, expr)).collect()
+}
+
+fn transform_comprehension<T: Transformer>(
+    transformer: &mut T,
+    mut node: ExprComprehension,
+) -> ExprComprehension {
+    node.elt = Box::new(transform_expr(transformer, *node.elt));
+    node.generators = node
+        .generators
+        .drain(..)
+        .map(|mut generator| {
+            generator.target = transform_expr(transformer, generator.target);
+            generator.iter = transform_expr(transformer, generator.iter);
+            generator.ifs = transform_expressions(transformer, generator.ifs);
+            generator
+        })
+        .collect();
+    node.key = node.key.take().map(|expr| Box::new(transform_expr(transformer, *expr)));
+    node.value = node.value.take().map(|expr| Box::new(transform_expr(transformer, *expr)));
+    node
+}
+
+/// Transforms one owned pattern and all of its descendants.
+pub fn transform_pattern<T: Transformer>(transformer: &mut T, pattern: Pattern) -> Pattern {
+    let pattern = match pattern {
+        Pattern::Value(mut node) => {
+            node.value = transform_expr(transformer, node.value);
+            Pattern::Value(node)
+        }
+        Pattern::Singleton(mut node) => {
+            node.value = transform_expr(transformer, node.value);
+            Pattern::Singleton(node)
+        }
+        Pattern::Sequence(mut node) => {
+            node.patterns = node
+                .patterns
+                .into_iter()
+                .map(|pattern| transform_pattern(transformer, pattern))
+                .collect();
+            Pattern::Sequence(node)
+        }
+        Pattern::Mapping(mut node) => {
+            node.keys = transform_expressions(transformer, node.keys);
+            node.patterns = node
+                .patterns
+                .into_iter()
+                .map(|pattern| transform_pattern(transformer, pattern))
+                .collect();
+            Pattern::Mapping(node)
+        }
+        Pattern::Class(mut node) => {
+            node.cls = transform_expr(transformer, node.cls);
+            node.patterns = node
+                .patterns
+                .into_iter()
+                .map(|pattern| transform_pattern(transformer, pattern))
+                .collect();
+            node.kwd_patterns = node
+                .kwd_patterns
+                .into_iter()
+                .map(|pattern| transform_pattern(transformer, pattern))
+                .collect();
+            Pattern::Class(node)
+        }
+        Pattern::As(mut node) => {
+            node.pattern =
+                node.pattern.map(|pattern| Box::new(transform_pattern(transformer, *pattern)));
+            Pattern::As(node)
+        }
+        Pattern::Or(mut node) => {
+            node.patterns = node
+                .patterns
+                .into_iter()
+                .map(|pattern| transform_pattern(transformer, pattern))
+                .collect();
+            Pattern::Or(node)
+        }
+        leaf => leaf,
+    };
+    transformer.transform_pattern(pattern)
+}
+
+fn transform_parameters<T: Transformer>(
+    transformer: &mut T,
+    mut parameters: Parameters,
+) -> Parameters {
+    parameters.posonlyargs = parameters
+        .posonlyargs
+        .into_iter()
+        .map(|parameter| transform_parameter(transformer, parameter))
+        .collect();
+    parameters.args = parameters
+        .args
+        .into_iter()
+        .map(|parameter| transform_parameter(transformer, parameter))
+        .collect();
+    parameters.vararg =
+        parameters.vararg.map(|parameter| transform_parameter(transformer, parameter));
+    parameters.kwonlyargs = parameters
+        .kwonlyargs
+        .into_iter()
+        .map(|parameter| transform_parameter(transformer, parameter))
+        .collect();
+    parameters.kw_defaults = parameters
+        .kw_defaults
+        .into_iter()
+        .map(|expr| expr.map(|expr| transform_expr(transformer, expr)))
+        .collect();
+    parameters.kwarg =
+        parameters.kwarg.map(|parameter| transform_parameter(transformer, parameter));
+    parameters.defaults = transform_expressions(transformer, parameters.defaults);
+    parameters
+}
+
+fn transform_parameter<T: Transformer>(transformer: &mut T, mut parameter: Parameter) -> Parameter {
+    parameter.annotation =
+        parameter.annotation.map(|expr| Box::new(transform_expr(transformer, *expr)));
+    parameter
+}
+
+fn transform_type_params<T: Transformer>(
+    transformer: &mut T,
+    params: Vec<TypeParam>,
+) -> Vec<TypeParam> {
+    params
+        .into_iter()
+        .map(|param| match param {
+            TypeParam::TypeVar(mut data) => {
+                data.bound = data.bound.map(|expr| transform_expr(transformer, expr));
+                data.default = data.default.map(|expr| transform_expr(transformer, expr));
+                TypeParam::TypeVar(data)
+            }
+            TypeParam::ParamSpec(mut data) => {
+                data.bound = data.bound.map(|expr| transform_expr(transformer, expr));
+                data.default = data.default.map(|expr| transform_expr(transformer, expr));
+                TypeParam::ParamSpec(data)
+            }
+            TypeParam::TypeVarTuple(mut data) => {
+                data.bound = data.bound.map(|expr| transform_expr(transformer, expr));
+                data.default = data.default.map(|expr| transform_expr(transformer, expr));
+                TypeParam::TypeVarTuple(data)
+            }
+        })
+        .collect()
+}
+
+fn transform_keyword<T: Transformer>(transformer: &mut T, mut keyword: Keyword) -> Keyword {
+    keyword.value = transform_expr(transformer, keyword.value);
+    keyword
+}
+
+fn transform_with_item<T: Transformer>(transformer: &mut T, mut item: WithItem) -> WithItem {
+    item.context_expr = transform_expr(transformer, item.context_expr);
+    item.optional_vars = item.optional_vars.map(|expr| transform_expr(transformer, expr));
+    item
+}
+
+fn transform_except_handler<T: Transformer>(
+    transformer: &mut T,
+    mut handler: ExceptHandler,
+) -> ExceptHandler {
+    handler.typ = handler.typ.map(|expr| transform_expr(transformer, expr));
+    handler.body = transform_statements(transformer, handler.body);
+    handler
 }
 
 impl Ranged for AnyNodeRef<'_> {

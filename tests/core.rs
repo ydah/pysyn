@@ -3,16 +3,61 @@
 use std::mem::size_of;
 
 use pysyn::ast::{Expr, ExprContext, Stmt};
-use pysyn::error::Severity;
+use pysyn::error::{Diagnostic, DiagnosticCode, Severity};
 use pysyn::lexer::{tokenize_with, LexMode, LexOptions};
 use pysyn::parser::{parse, ParseMode, ParseOptions};
 use pysyn::token::{PythonVersion, TokenKind};
 use pysyn::validate::{validate, ValidateLevel};
+use pysyn::visit::{transform_module, Transformer};
+use pysyn::{TextRange, TextSize};
 
 #[test]
 fn ast_enums_remain_compact() {
     assert!(size_of::<Expr>() <= 64, "Expr is {} bytes", size_of::<Expr>());
     assert!(size_of::<Stmt>() <= 96, "Stmt is {} bytes", size_of::<Stmt>());
+}
+
+#[test]
+fn transformer_visits_owned_expression_and_pattern_descendants() {
+    struct Counter {
+        expressions: usize,
+        patterns: usize,
+    }
+    impl Transformer for Counter {
+        fn transform_expr(&mut self, node: Expr) -> Expr {
+            self.expressions += 1;
+            node
+        }
+        fn transform_pattern(&mut self, node: pysyn::ast::Pattern) -> pysyn::ast::Pattern {
+            self.patterns += 1;
+            node
+        }
+    }
+
+    let module = pysyn::parse_module(
+        "value = left + right\nmatch value:\n    case (1, item):\n        pass\n",
+    )
+    .expect("valid transformer source");
+    let mut counter = Counter { expressions: 0, patterns: 0 };
+    let transformed = transform_module(&mut counter, module);
+    assert_eq!(transformed.body.len(), 2);
+    assert!(counter.expressions >= 5);
+    assert!(counter.patterns >= 3);
+}
+
+#[test]
+fn diagnostic_display_preserves_labels_help_and_unicode_columns() {
+    let diagnostic = Diagnostic::error(
+        DiagnosticCode::Syntax,
+        TextRange::new(TextSize::new(4), TextSize::new(5)),
+        "invalid target",
+    )
+    .with_label(TextRange::new(TextSize::new(0), TextSize::new(3)), "value starts here")
+    .with_help("use a name instead");
+    let rendered = diagnostic.display_with_source("example.py", "あ = 1\n");
+    assert!(rendered.contains("File \"example.py\""));
+    assert!(rendered.contains("label: value starts here"));
+    assert!(rendered.contains("help: use a name instead"));
 }
 
 #[test]

@@ -1,13 +1,16 @@
 //! AST dump and Python source generation.
 
-#![allow(missing_docs)]
-
+//! Dump output follows CPython's attribute-oriented representation, while
+//! unparse emits valid Python source from the recovered AST.
 use crate::ast::*;
 use crate::source::{LineIndex, TextRange};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Public API item.
 pub struct DumpOptions {
+    /// Value stored by this public node.
     pub include_attributes: bool,
+    /// Value stored by this public node.
     pub indent: Option<usize>,
     source: Option<Box<str>>,
     line_index: Option<LineIndex>,
@@ -20,16 +23,19 @@ impl Default for DumpOptions {
 }
 
 impl DumpOptions {
+    /// Performs this public operation.
     pub fn with_attributes(include_attributes: bool) -> Self {
         Self { include_attributes, ..Self::default() }
     }
 
+    /// Performs this public operation.
     pub fn with_indent(mut self, indent: Option<usize>) -> Self {
         self.indent = indent;
         self
     }
 }
 
+/// Performs this public operation.
 pub fn dump(module: &ModModule, options: DumpOptions) -> String {
     let mut options = options;
     if options.include_attributes && options.source.is_none() {
@@ -41,6 +47,7 @@ pub fn dump(module: &ModModule, options: DumpOptions) -> String {
     format_dump(output, options.indent)
 }
 
+/// Performs this public operation.
 pub fn dump_with_source(module: &ModModule, source: &str, options: DumpOptions) -> String {
     let mut options = options;
     options.source = Some(source.into());
@@ -128,6 +135,7 @@ fn format_dump(value: String, indent: Option<usize>) -> String {
     output
 }
 
+/// Performs this public operation.
 pub fn unparse(module: &ModModule) -> String {
     let mut printer = Unparser { output: String::new(), indent: 0 };
     for statement in &module.body {
@@ -136,6 +144,7 @@ pub fn unparse(module: &ModModule) -> String {
     printer.output
 }
 
+/// Performs this public operation.
 pub fn pyrepr(value: &str) -> String {
     repr_string(value)
 }
@@ -1654,33 +1663,37 @@ impl Unparser {
     }
     fn parameters(&self, parameters: &Parameters) -> String {
         let mut values = Vec::new();
-        values.extend(parameters.posonlyargs.iter().map(|parameter| self.parameter(parameter)));
+        let positional = parameters.posonlyargs.iter().chain(&parameters.args).collect::<Vec<_>>();
+        let default_start = positional.len().saturating_sub(parameters.defaults.len());
+        values.extend(positional.iter().enumerate().map(|(index, parameter)| {
+            let default =
+                index.checked_sub(default_start).and_then(|index| parameters.defaults.get(index));
+            self.parameter(parameter, default)
+        }));
         if !parameters.posonlyargs.is_empty() {
             values.push("/".into());
         }
-        values.extend(parameters.args.iter().map(|parameter| self.parameter(parameter)));
         if let Some(vararg) = &parameters.vararg {
-            values.push(format!("*{}", self.parameter(vararg)));
+            values.push(format!("*{}", self.parameter(vararg, None)));
         } else if !parameters.kwonlyargs.is_empty() {
             values.push("*".into());
         }
-        values.extend(parameters.kwonlyargs.iter().map(|parameter| self.parameter(parameter)));
+        values.extend(parameters.kwonlyargs.iter().enumerate().map(|(index, parameter)| {
+            self.parameter(parameter, parameters.kw_defaults.get(index).and_then(Option::as_ref))
+        }));
         if let Some(kwarg) = &parameters.kwarg {
-            values.push(format!("**{}", self.parameter(kwarg)));
+            values.push(format!("**{}", self.parameter(kwarg, None)));
         }
         values.join(", ")
     }
-    fn parameter(&self, parameter: &Parameter) -> String {
+    fn parameter(&self, parameter: &Parameter, default: Option<&Expr>) -> String {
         let annotation = parameter
             .annotation
             .as_ref()
             .map(|value| format!(": {}", self.expression(value)))
             .unwrap_or_default();
-        let default = parameter
-            .default
-            .as_ref()
-            .map(|value| format!(" = {}", self.expression(value)))
-            .unwrap_or_default();
+        let default =
+            default.map(|value| format!(" = {}", self.expression(value))).unwrap_or_default();
         format!("{}{annotation}{default}", parameter.name)
     }
     fn expression(&self, expression: &Expr) -> String {

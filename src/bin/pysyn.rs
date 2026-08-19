@@ -48,11 +48,11 @@ fn main() {
     let source = &input_source.text;
     match command.as_str() {
         "tokenize" => {
-            let index = pysyn::LineIndex::new(&source);
+            let index = pysyn::LineIndex::new(source);
             if cpython_format {
-                print_cpython_tokens(&source, &input_source.encoding, &index);
+                print_cpython_tokens(source, &input_source.encoding, &index);
             } else {
-                for item in pysyn::lexer::tokenize(&source) {
+                for item in pysyn::lexer::tokenize(source) {
                     match item {
                         Ok(token) => println!("{:?} {}", token.kind, token.range),
                         Err(error) => eprintln!("{error}"),
@@ -60,7 +60,7 @@ fn main() {
                 }
             }
         }
-        "parse" | "dump" => match pysyn::parse_module(&source) {
+        "parse" | "dump" => match pysyn::parse_module(source) {
             Ok(module) => {
                 let options = pysyn::printer::DumpOptions::with_attributes(dump_attributes);
                 println!("{}", pysyn::printer::dump(&module, options));
@@ -70,14 +70,14 @@ fn main() {
                 std::process::exit(1);
             }
         },
-        "unparse" => match pysyn::parse_module(&source) {
+        "unparse" => match pysyn::parse_module(source) {
             Ok(module) => print!("{}", pysyn::printer::unparse(&module)),
             Err(error) => {
                 eprintln!("{}", error.diagnostic.display_with_source(&input_source.name, source));
                 std::process::exit(1);
             }
         },
-        "check" => match pysyn::parse_module(&source) {
+        "check" => match pysyn::parse_module(source) {
             Ok(module) => {
                 let diagnostics =
                     pysyn::validate::validate(&module, pysyn::validate::ValidateLevel::Semantic);

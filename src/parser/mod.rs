@@ -1,7 +1,7 @@
 //! Hand-written recursive-descent and Pratt parser.
 
-#![allow(missing_docs)]
-
+//! The strict entry points reject lexical and syntactic errors; [`parse`]
+//! provides bounded recovery and returns all collected diagnostics.
 use crate::ast::*;
 use crate::error::{Diagnostic, DiagnosticCode, ParseError, Severity};
 use crate::lexer::{tokenize_with, LexMode, LexOptions};
@@ -13,24 +13,37 @@ use unicode_normalization::UnicodeNormalization;
 
 /// Parsing mode for complete source text.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+/// Public API item.
 pub enum SourceMode {
+    /// AST variant.
     Module,
+    /// AST variant.
     Expression,
+    /// AST variant.
     Interactive,
 }
 
 /// Controls strictness and parser resource limits.
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Public API item.
 pub struct ParseOptions {
+    /// Value stored by this public node.
     pub version: PythonVersion,
+    /// Value stored by this public node.
     pub mode: SourceMode,
+    /// Value stored by this public node.
     pub parse_mode: ParseMode,
+    /// Value stored by this public node.
     pub keep_comments: bool,
+    /// Value stored by this public node.
     pub type_comments: bool,
+    /// Value stored by this public node.
     pub max_depth: u32,
     /// Maximum number of expression parser invocations allowed for one input.
     pub max_nodes: usize,
+    /// Value stored by this public node.
     pub max_errors: usize,
+    /// Value stored by this public node.
     pub keep_tokens: bool,
 }
 
@@ -52,17 +65,25 @@ impl Default for ParseOptions {
 
 /// Controls whether syntax errors stop parsing.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+/// Public API item.
 pub enum ParseMode {
+    /// AST variant.
     Strict,
+    /// AST variant.
     Recover,
 }
 
 /// A recovered parse result.
 #[derive(Clone, Debug, PartialEq)]
+/// Public API item.
 pub struct Parsed {
+    /// Value stored by this public node.
     pub module: ModModule,
+    /// Value stored by this public node.
     pub comments: Vec<Comment>,
+    /// Value stored by this public node.
     pub tokens: Vec<Token>,
+    /// Value stored by this public node.
     pub errors: Vec<Diagnostic>,
 }
 
@@ -71,8 +92,14 @@ pub fn parse_module(src: &str) -> Result<ModModule, ParseError> {
     if src.len() > u32::MAX as usize {
         return Err(ParseError::source_too_large());
     }
-    let options = ParseOptions { mode: SourceMode::Module, ..ParseOptions::default() };
+    let options =
+        ParseOptions { mode: SourceMode::Module, keep_comments: false, ..ParseOptions::default() };
     let mut parser = Parser::new(src, options);
+    if let Some(error) =
+        parser.errors.iter().find(|diagnostic| diagnostic.severity == Severity::Error).cloned()
+    {
+        return Err(ParseError { diagnostic: error });
+    }
     let module = parser.parse_module_inner()?;
     if let Some(error) =
         parser.errors.into_iter().find(|diagnostic| diagnostic.severity == Severity::Error)
@@ -87,8 +114,17 @@ pub fn parse_expression(src: &str) -> Result<Expr, ParseError> {
     if src.len() > u32::MAX as usize {
         return Err(ParseError::source_too_large());
     }
-    let options = ParseOptions { mode: SourceMode::Expression, ..ParseOptions::default() };
+    let options = ParseOptions {
+        mode: SourceMode::Expression,
+        keep_comments: false,
+        ..ParseOptions::default()
+    };
     let mut parser = Parser::new(src, options);
+    if let Some(error) =
+        parser.errors.iter().find(|diagnostic| diagnostic.severity == Severity::Error).cloned()
+    {
+        return Err(ParseError { diagnostic: error });
+    }
     let first = parser.expression(0)?;
     let expr = if parser.at(TokenKind::Comma) { parser.comma_expression(first)? } else { first };
     parser.skip_newlines();
@@ -119,7 +155,6 @@ pub fn parse(src: &str, options: ParseOptions) -> Parsed {
             errors: vec![error],
         };
     }
-    let escape_warnings = collect_invalid_escape_warnings(src, options.version);
     let mut parser = Parser::new(src, options);
     let module = match parser.options.mode {
         SourceMode::Expression => match parser.expression(0) {
@@ -128,11 +163,7 @@ pub fn parse(src: &str, options: ParseOptions) -> Parsed {
                     range: expression.range(),
                     value: Box::new(expression),
                 })],
-                type_ignores: if parser.options.type_comments {
-                    collect_type_ignores(src)
-                } else {
-                    Vec::new()
-                },
+                type_ignores: parser.type_ignores.clone(),
                 range: TextRange::from_usize(0, src.len()),
                 source: Some(src.into()),
             },
@@ -140,11 +171,7 @@ pub fn parse(src: &str, options: ParseOptions) -> Parsed {
                 parser.push_error(error.diagnostic);
                 ModModule {
                     body: Vec::new(),
-                    type_ignores: if parser.options.type_comments {
-                        collect_type_ignores(src)
-                    } else {
-                        Vec::new()
-                    },
+                    type_ignores: parser.type_ignores.clone(),
                     range: TextRange::from_usize(0, src.len()),
                     source: Some(src.into()),
                 }
@@ -156,26 +183,27 @@ pub fn parse(src: &str, options: ParseOptions) -> Parsed {
                 parser.push_error(error.diagnostic);
                 ModModule {
                     body: Vec::new(),
-                    type_ignores: if parser.options.type_comments {
-                        collect_type_ignores(src)
-                    } else {
-                        Vec::new()
-                    },
+                    type_ignores: parser.type_ignores.clone(),
                     range: TextRange::from_usize(0, src.len()),
                     source: Some(src.into()),
                 }
             }
         },
     };
-    parser.errors.extend(escape_warnings);
-    let comments = if parser.options.keep_comments { collect_comments(src) } else { Vec::new() };
+    parser.errors.extend(collect_invalid_escape_warnings(src, &parser.tokens));
+    let comments = if parser.options.keep_comments {
+        std::mem::take(&mut parser.comments)
+    } else {
+        Vec::new()
+    };
     let tokens = if parser.options.keep_tokens { parser.tokens.clone() } else { Vec::new() };
     Parsed { module, comments, tokens, errors: parser.errors }
 }
 
-fn collect_invalid_escape_warnings(src: &str, version: PythonVersion) -> Vec<Diagnostic> {
-    tokenize_with(src, LexOptions { mode: LexMode::Parse, version })
-        .filter_map(Result::ok)
+fn collect_invalid_escape_warnings(src: &str, tokens: &[Token]) -> Vec<Diagnostic> {
+    tokens
+        .iter()
+        .copied()
         .filter_map(|token| {
             let TokenKind::String { prefix, triple } = token.kind else { return None };
             if prefix.is_raw() {
@@ -267,35 +295,38 @@ fn valid_named_escape(bytes: &[u8], index: &mut usize) -> bool {
     *index > start && bytes.get(*index) == Some(&b'}')
 }
 
-fn collect_comments(src: &str) -> Vec<Comment> {
-    tokenize_with(src, LexOptions { mode: LexMode::Full, ..LexOptions::default() })
-        .filter_map(|item| item.ok())
-        .filter(|token| token.kind == TokenKind::Comment)
-        .map(|token| Comment { range: token.range, text: src[token.range].into() })
-        .collect()
-}
-
-fn collect_type_ignores(src: &str) -> Vec<TypeIgnore> {
+fn collect_trivia(src: &str, include_type_ignores: bool) -> (Vec<Comment>, Vec<TypeIgnore>) {
     let index = LineIndex::new(src);
-    tokenize_with(src, LexOptions { mode: LexMode::Full, ..LexOptions::default() })
+    let mut comments = Vec::new();
+    let mut type_ignores = Vec::new();
+    for token in tokenize_with(src, LexOptions { mode: LexMode::Full, ..LexOptions::default() })
         .filter_map(Result::ok)
-        .filter(|token| token.kind == TokenKind::Comment)
-        .filter_map(|token| {
-            let comment = src.get(token.range.start().as_usize()..token.range.end().as_usize())?;
-            let suffix = comment.strip_prefix('#')?.trim_start();
-            let suffix = suffix.strip_prefix("type:")?.trim_start();
-            let tag = suffix.strip_prefix("ignore")?;
-            if !tag.is_empty() && !tag.starts_with('[') {
-                return None;
-            }
-            let tag = if tag.starts_with('[') { tag.trim().to_owned() } else { "\n".into() };
-            Some(TypeIgnore {
-                range: token.range,
-                lineno: index.line_col_chars(src, token.range.start()).line,
-                tag: tag.into(),
-            })
-        })
-        .collect()
+    {
+        if token.kind != TokenKind::Comment {
+            continue;
+        }
+        comments.push(Comment { range: token.range, text: src[token.range].into() });
+        if !include_type_ignores {
+            continue;
+        }
+        let Some(comment) = src.get(token.range.start().as_usize()..token.range.end().as_usize())
+        else {
+            continue;
+        };
+        let Some(suffix) = comment.strip_prefix('#').map(str::trim_start) else { continue };
+        let Some(suffix) = suffix.strip_prefix("type:").map(str::trim_start) else { continue };
+        let Some(tag) = suffix.strip_prefix("ignore") else { continue };
+        if !tag.is_empty() && !tag.starts_with('[') {
+            continue;
+        }
+        let tag = if tag.starts_with('[') { tag.trim().to_owned() } else { "\n".into() };
+        type_ignores.push(TypeIgnore {
+            range: token.range,
+            lineno: index.line_col_chars(src, token.range.start()).line,
+            tag: tag.into(),
+        });
+    }
+    (comments, type_ignores)
 }
 
 struct Parser<'src> {
@@ -304,6 +335,8 @@ struct Parser<'src> {
     position: usize,
     options: ParseOptions,
     errors: Vec<Diagnostic>,
+    comments: Vec<Comment>,
+    type_ignores: Vec<TypeIgnore>,
     depth: u32,
     expression_nodes: usize,
     grouped_expressions: HashSet<TextRange>,
@@ -337,12 +370,19 @@ impl<'src> Parser<'src> {
                 TextRange::empty(TextRange::from_usize(src.len(), src.len()).start()),
             ));
         }
+        let (comments, type_ignores) = if options.keep_comments || options.type_comments {
+            collect_trivia(src, options.type_comments)
+        } else {
+            (Vec::new(), Vec::new())
+        };
         Self {
             src,
             tokens,
             position: 0,
             options,
             errors,
+            comments,
+            type_ignores,
             depth: 0,
             expression_nodes: 0,
             grouped_expressions: HashSet::new(),
@@ -380,11 +420,7 @@ impl<'src> Parser<'src> {
         }
         Ok(ModModule {
             body,
-            type_ignores: if self.options.type_comments {
-                collect_type_ignores(self.src)
-            } else {
-                Vec::new()
-            },
+            type_ignores: self.type_ignores.clone(),
             range: TextRange::from_usize(0, self.src.len()),
             source: Some(self.src.into()),
         })
@@ -956,6 +992,16 @@ impl<'src> Parser<'src> {
             let name = self.dotted_name()?;
             let asname = if self.eat(TokenKind::As) {
                 let as_token = self.expect(TokenKind::Name)?;
+                if !matches!(
+                    self.current().kind,
+                    TokenKind::Comma
+                        | TokenKind::Newline
+                        | TokenKind::NonLogicalNewline
+                        | TokenKind::Semi
+                        | TokenKind::EndMarker
+                ) {
+                    return Err(ParseError::syntax(as_token.range, "invalid import alias"));
+                }
                 Some(self.name_text(as_token).to_owned().into())
             } else {
                 None
@@ -999,6 +1045,17 @@ impl<'src> Parser<'src> {
                 let name = normalize_identifier(self.name_text(name_token));
                 let asname = if self.eat(TokenKind::As) {
                     let as_token = self.expect(TokenKind::Name)?;
+                    if !matches!(
+                        self.current().kind,
+                        TokenKind::Comma
+                            | TokenKind::RPar
+                            | TokenKind::Newline
+                            | TokenKind::NonLogicalNewline
+                            | TokenKind::Semi
+                            | TokenKind::EndMarker
+                    ) {
+                        return Err(ParseError::syntax(as_token.range, "invalid import alias"));
+                    }
                     Some(self.name_text(as_token).to_owned().into())
                 } else {
                     None
@@ -1142,6 +1199,25 @@ impl<'src> Parser<'src> {
                 type_comment,
             }));
         }
+        if !matches!(
+            self.current().kind,
+            TokenKind::Newline
+                | TokenKind::NonLogicalNewline
+                | TokenKind::Semi
+                | TokenKind::EndMarker
+                | TokenKind::Dedent
+        ) {
+            let range = if matches!(
+                self.current().kind,
+                TokenKind::String { .. } | TokenKind::FStringStart { .. }
+            ) && matches!(&first, Expr::Name(_))
+            {
+                TextRange::empty(first_start)
+            } else {
+                self.current().range
+            };
+            return Err(ParseError::syntax(range, "invalid syntax"));
+        }
         self.consume_line_end();
         Ok(Stmt::Expr(StmtExpr { range: self.expression_range(&first), value: Box::new(first) }))
     }
@@ -1223,7 +1299,6 @@ impl<'src> Parser<'src> {
                     range: TextRange::new(token.range.start(), end),
                     name: normalize_identifier(self.name_text(token)),
                     annotation,
-                    default: None,
                     type_comment: None,
                 });
                 self.eat(TokenKind::Comma);
@@ -1251,7 +1326,6 @@ impl<'src> Parser<'src> {
                         range: TextRange::new(token.range.start(), end),
                         name: normalize_identifier(self.name_text(token)),
                         annotation,
-                        default: None,
                         type_comment: None,
                     });
                     keyword_only = true;
@@ -1297,7 +1371,6 @@ impl<'src> Parser<'src> {
                     range: TextRange::new(token.range.start(), end),
                     name,
                     annotation,
-                    default: default.clone(),
                     type_comment: None,
                 };
                 if keyword_only {
@@ -2568,7 +2641,6 @@ impl<'src> Parser<'src> {
                     range: token.range,
                     name: normalize_identifier(self.name_text(token)),
                     annotation: None,
-                    default: None,
                     type_comment: None,
                 });
             } else if self.at(TokenKind::Star) {
@@ -2585,7 +2657,6 @@ impl<'src> Parser<'src> {
                         range: token.range,
                         name: normalize_identifier(self.name_text(token)),
                         annotation: None,
-                        default: None,
                         type_comment: None,
                     });
                 }
@@ -2616,13 +2687,8 @@ impl<'src> Parser<'src> {
                     }
                     None
                 };
-                let parameter = Parameter {
-                    range: token.range,
-                    name,
-                    annotation: None,
-                    default: default.clone(),
-                    type_comment: None,
-                };
+                let parameter =
+                    Parameter { range: token.range, name, annotation: None, type_comment: None };
                 if keyword_only {
                     parameters.kwonlyargs.push(parameter);
                     parameters.kw_defaults.push(default.map(|value| *value));
