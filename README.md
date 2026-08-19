@@ -20,8 +20,21 @@ The parser is framework-independent and does not execute Python code.
 
 ## Installation
 
-When using the repository directly, add a path dependency to your
-`Cargo.toml`:
+Add `pysyn` from the repository to your `Cargo.toml`:
+
+```toml
+[dependencies]
+pysyn = { git = "https://github.com/ydah/pysyn" }
+```
+
+To enable decoding for declared non-UTF-8 source encodings:
+
+```toml
+[dependencies]
+pysyn = { git = "https://github.com/ydah/pysyn", features = ["encoding"] }
+```
+
+When using a local checkout directly, use a path dependency instead:
 
 ```toml
 [dependencies]
