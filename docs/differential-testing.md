@@ -1,7 +1,8 @@
 # Differential verification
 
 `tools/differential.py` compares the CLI with a selected CPython executable
-without downloading a corpus. It supports Python 3.10, 3.11, 3.12, and 3.13.
+without downloading a corpus. Structural comparisons support Python 3.8–3.13;
+strict AST location comparisons support Python 3.10–3.13.
 With no paths it runs a small version-aware smoke corpus. Passing files or
 directories makes the same checks run against a local corpus.
 
@@ -11,8 +12,9 @@ The three checks are:
   F-string token cases are skipped unless `--include-fstrings` is supplied.
 - `ast`: a structural comparison of the CPython AST and `pysyn dump`. Empty
   optional fields are ignored so Python-version additions such as `type_params`
-  do not create false positives. `--strict-ast` also compares CPython location
-  attributes; the CLI dump includes them by default, while
+  do not create false positives. The legacy Python 3.8 `ast.Index` wrapper is
+  normalized to the modern `Subscript.slice` form. `--strict-ast` also compares
+  CPython location attributes; the CLI dump includes them by default, while
   `--no-attributes` selects the structural form.
 - `roundtrip`: parses `pysyn unparse` with CPython and compares its structural
   AST with the original. It also checks that pysyn accepts its own output.

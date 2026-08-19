@@ -28,6 +28,16 @@ class DifferentialAstTests(unittest.TestCase):
         right = normalized_dump("Call(func=Name(id='f'), args=[], keywords=[])")
         self.assertTrue(dumps_equal(left, right))
 
+    def test_legacy_index_wrapper_is_ignored(self) -> None:
+        legacy = normalized_dump(
+            "Subscript(value=Name(id='items'), "
+            "slice=Index(value=Constant(value=1)))"
+        )
+        modern = normalized_dump(
+            "Subscript(value=Name(id='items'), slice=Constant(value=1))"
+        )
+        self.assertTrue(dumps_equal(legacy, modern))
+
 
 if __name__ == "__main__":
     unittest.main()

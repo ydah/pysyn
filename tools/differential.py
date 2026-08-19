@@ -19,13 +19,16 @@ from pathlib import Path
 from differential_cases import builtin_cases, source_cases
 from differential_compare import Finding, compare_ast, compare_roundtrip, compare_tokens, finding_json
 
+STRUCTURAL_VERSIONS = {(3, 8), (3, 9), (3, 10), (3, 11), (3, 12), (3, 13)}
+STRICT_AST_VERSIONS = {(3, 10), (3, 11), (3, 12), (3, 13)}
+
 
 def parser() -> argparse.ArgumentParser:
     """Build the command-line interface."""
 
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("paths", nargs="*", type=Path, help="Python files/directories to compare")
-    result.add_argument("--python", default=sys.executable, help="CPython executable (3.10–3.13)")
+    result.add_argument("--python", default=sys.executable, help="CPython executable (3.8–3.13)")
     result.add_argument("--pysyn", default=os.environ.get("PYSYN_BIN"), help="pysyn executable")
     result.add_argument("--mode", choices=("token", "ast", "roundtrip", "all"), default="all")
     result.add_argument("--limit", type=int, help="maximum number of path cases")
@@ -64,8 +67,10 @@ def run(args: argparse.Namespace) -> int:
     """Execute requested comparisons and return a process status."""
 
     version = python_version(args.python)
-    if version not in {(3, 10), (3, 11), (3, 12), (3, 13)}:
-        print(f"warning: requested CPython is {version[0]}.{version[1]}; supported matrix is 3.10–3.13", file=sys.stderr)
+    if version not in STRUCTURAL_VERSIONS:
+        print(f"warning: requested CPython is {version[0]}.{version[1]}; supported range is 3.8–3.13", file=sys.stderr)
+    if args.strict_ast and version not in STRICT_AST_VERSIONS:
+        print("warning: strict AST locations are supported only for CPython 3.10–3.13", file=sys.stderr)
     pysyn = resolve_pysyn(args.pysyn)
     cases = source_cases(args.paths, args.limit) if args.paths else builtin_cases(version)
     if args.limit is not None and not args.paths:

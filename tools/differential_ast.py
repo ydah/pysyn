@@ -69,6 +69,8 @@ def normalize_dump(node: ast.AST | ast.expr | Any) -> Any:
     if isinstance(node, ast.Call):
         name = node.func.id if isinstance(node.func, ast.Name) else ast.dump(node.func)
         fields = {keyword.arg: normalize_dump(keyword.value) for keyword in node.keywords}
+        if name == "Index":
+            return fields.get("value")
         return {"_type": name, **normalize_fields(fields, name)}
     if isinstance(node, ast.List):
         return [normalize_dump(element) for element in node.elts]
