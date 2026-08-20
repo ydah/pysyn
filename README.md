@@ -146,4 +146,5 @@ python tools/fuzz_smoke.py --pysyn target/debug/pysyn
 
 ## License
 
-Licensed under the MIT License or Apache License 2.0.
+Licensed under either the [MIT License](LICENSE-MIT) or the
+[Apache License, Version 2.0](LICENSE-APACHE).
